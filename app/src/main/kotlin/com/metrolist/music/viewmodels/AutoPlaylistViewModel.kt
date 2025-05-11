@@ -43,18 +43,19 @@ constructor(
 
     val playlist = savedStateHandle.get<String>("playlist")!!
 
-    val likedSongs =
-        combine(
-            context.dataStore.data.map {
-                it[SongSortTypeKey].toEnum(SongSortType.CREATE_DATE) to (it[SongSortDescendingKey] ?: true)
-            }.distinctUntilChanged(),
-            context.dataStore.data.map {
-                it[HideExplicitKey] ?: false
-            }.distinctUntilChanged()
-        ) { (sortType, descending), hideExplicit ->
-            Triple(sortType, descending, hideExplicit)
+    private val sortFlow = context.dataStore.data
+        .map {
+            it[SongSortTypeKey].toEnum(SongSortType.CREATE_DATE) to (it[SongSortDescendingKey] ?: true)
         }
-            .flatMapLatest { (sortType, descending, hideExplicit) ->
+        .distinctUntilChanged()
+
+    private val hideExplicitFlow = context.dataStore.data
+        .map { it[HideExplicitKey] ?: false }
+        .distinctUntilChanged()
+
+    val likedSongs =
+        sortFlow.flatMapLatest { (sortType, descending) ->
+            hideExplicitFlow.flatMapLatest { hideExplicit ->
                 when (playlist) {
                     "liked" -> database.likedSongs(sortType, descending)
                         .map { songs ->
@@ -90,7 +91,8 @@ constructor(
 
                     else -> MutableStateFlow(emptyList())
                 }
-            }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+            }
+        }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     fun syncLikedSongs() {
         viewModelScope.launch(Dispatchers.IO) {

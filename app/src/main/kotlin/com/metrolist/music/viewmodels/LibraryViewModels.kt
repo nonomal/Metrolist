@@ -99,7 +99,9 @@ constructor(
                     baseFlow.map { songs ->
                         val filtered = if (hideExplicit) songs.filterNot { it.song.explicit == true } else songs
                         when (sortType) {
-                            SongSortType.CREATE_DATE -> filtered.sortedBy { it.song.dateAdded }
+                            SongSortType.CREATE_DATE -> songs.sortedBy {
+                                downloads[it.id]?.updateTimeMs ?: 0L
+                            }
                             SongSortType.NAME -> filtered.sortedBy { it.song.title }
                             SongSortType.ARTIST -> {
                                 val collator = Collator.getInstance(Locale.getDefault()).apply {

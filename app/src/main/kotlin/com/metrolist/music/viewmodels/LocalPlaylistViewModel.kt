@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.metrolist.music.constants.HideExplicitKey
 import com.metrolist.music.constants.PlaylistSongSortDescendingKey
 import com.metrolist.music.constants.PlaylistSongSortType
 import com.metrolist.music.constants.PlaylistSongSortTypeKey
@@ -35,10 +36,16 @@ constructor(
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
     val playlistId = savedStateHandle.get<String>("playlistId")!!
+
     val playlist =
         database
             .playlist(playlistId)
             .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    private val hideExplicitFlow = context.dataStore.data
+        .map { it[HideExplicitKey] ?: false }
+        .distinctUntilChanged()
+
     val playlistSongs: StateFlow<List<PlaylistSong>> =
         combine(
             database.playlistSongs(playlistId),
@@ -47,28 +54,31 @@ constructor(
                     it[PlaylistSongSortTypeKey].toEnum(PlaylistSongSortType.CUSTOM) to (it[PlaylistSongSortDescendingKey]
                         ?: true)
                 }.distinctUntilChanged(),
-        ) { songs, (sortType, sortDescending) ->
-            when (sortType) {
-                PlaylistSongSortType.CUSTOM -> songs
-                PlaylistSongSortType.CREATE_DATE -> songs.sortedBy { it.map.id }
-                PlaylistSongSortType.NAME -> songs.sortedBy { it.song.song.title }
+            hideExplicitFlow
+        ) { songs, (sortType, sortDescending), hideExplicit ->
+            val filteredSongs = if (hideExplicit) songs.filterNot { it.song.song.explicit == true } else songs
+
+            val sortedSongs = when (sortType) {
+                PlaylistSongSortType.CUSTOM -> filteredSongs
+                PlaylistSongSortType.CREATE_DATE -> filteredSongs.sortedBy { it.map.id }
+                PlaylistSongSortType.NAME -> filteredSongs.sortedBy { it.song.song.title }
                 PlaylistSongSortType.ARTIST -> {
                     val collator = Collator.getInstance(Locale.getDefault())
                     collator.strength = Collator.PRIMARY
-                    songs
+                    filteredSongs
                         .sortedWith(compareBy(collator) { song -> song.song.artists.joinToString("") { it.name } })
                         .groupBy { it.song.album?.title }
                         .flatMap { (_, songsByAlbum) ->
                             songsByAlbum.sortedBy {
-                                it.song.artists.joinToString(
-                                    ""
-                                ) { it.name }
+                                it.song.artists.joinToString("") { it.name }
                             }
                         }
                 }
 
-                PlaylistSongSortType.PLAY_TIME -> songs.sortedBy { it.song.song.totalPlayTime }
-            }.reversed(sortDescending && sortType != PlaylistSongSortType.CUSTOM)
+                PlaylistSongSortType.PLAY_TIME -> filteredSongs.sortedBy { it.song.song.totalPlayTime }
+            }
+
+            sortedSongs.reversed(sortDescending && sortType != PlaylistSongSortType.CUSTOM)
         }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     init {

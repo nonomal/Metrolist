@@ -5,6 +5,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.exoplayer.offline.Download
+import com.metrolist.music.constants.HideExplicitKey
 import com.metrolist.music.constants.SongSortDescendingKey
 import com.metrolist.music.constants.SongSortType
 import com.metrolist.music.constants.SongSortTypeKey
@@ -41,7 +42,10 @@ constructor(
 ) : ViewModel() {
     val playlist = savedStateHandle.get<String>("playlist")!!
 
-    @OptIn(ExperimentalCoroutinesApi::class)
+    private val hideExplicitFlow = context.dataStore.data
+        .map { it[HideExplicitKey] ?: false }
+        .distinctUntilChanged()
+
     val likedSongs =
         context.dataStore.data
             .map {
@@ -50,33 +54,40 @@ constructor(
             }
             .distinctUntilChanged()
             .flatMapLatest { (sortType, descending) ->
-                when (playlist) {
-                    "liked" -> database.likedSongs(sortType, descending)
-                    "downloaded" -> downloadUtil.downloads.flatMapLatest { downloads ->
-                        database.allSongs()
-                            .flowOn(Dispatchers.IO)
+                hideExplicitFlow.flatMapLatest { hideExplicit ->
+                    when (playlist) {
+                        "liked" -> database.likedSongs(sortType, descending)
                             .map { songs ->
-                                songs.filter {
-                                    downloads[it.id]?.state == Download.STATE_COMPLETED
+                                val filtered = if (hideExplicit) songs.filterNot { it.song.explicit == true } else songs
+                                filtered.reversed(descending)
+                            }
+
+                        "downloaded" -> downloadUtil.downloads.flatMapLatest { downloads ->
+                            database.allSongs()
+                                .flowOn(Dispatchers.IO)
+                                .map { songs ->
+                                    songs.filter {
+                                        downloads[it.id]?.state == Download.STATE_COMPLETED
+                                    }.let { downloaded ->
+                                        val explicitFiltered = if (hideExplicit) downloaded.filterNot { it.song.explicit == true } else downloaded
+                                        when (sortType) {
+                                            SongSortType.CREATE_DATE -> explicitFiltered.sortedBy {
+                                                downloads[it.id]?.updateTimeMs ?: 0L
+                                            }
+
+                                            SongSortType.NAME -> explicitFiltered.sortedBy { it.song.title }
+                                            SongSortType.ARTIST -> explicitFiltered.sortedBy { song ->
+                                                song.song.artistName ?: song.artists.joinToString("") { it.name }
+                                            }
+
+                                            SongSortType.PLAY_TIME -> explicitFiltered.sortedBy { it.song.totalPlayTime }
+                                        }.reversed(descending)
+                                    }
                                 }
-                            }
-                            .map { songs ->
-                                when (sortType) {
-                                    SongSortType.CREATE_DATE -> songs.sortedBy {
-                                        downloads[it.id]?.updateTimeMs ?: 0L
-                                    }
+                        }
 
-                                    SongSortType.NAME -> songs.sortedBy { it.song.title }
-                                    SongSortType.ARTIST -> songs.sortedBy { song ->
-                                        song.song.artistName ?: song.artists.joinToString(separator = "") { it.name }
-                                    }
-
-                                    SongSortType.PLAY_TIME -> songs.sortedBy { it.song.totalPlayTime }
-                                }.reversed(descending)
-                            }
+                        else -> MutableStateFlow(emptyList())
                     }
-
-                    else -> MutableStateFlow(emptyList())
                 }
             }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 

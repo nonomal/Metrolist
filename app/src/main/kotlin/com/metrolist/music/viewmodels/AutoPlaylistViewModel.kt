@@ -49,48 +49,49 @@ constructor(
         }
         .distinctUntilChanged()
 
-    private val hideExplicitFlow = context.dataStore.data
+    private val hideExplicitState = context.dataStore.data
         .map { it[HideExplicitKey] ?: false }
-        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Lazily, false)
 
     val likedSongs =
         sortFlow.flatMapLatest { (sortType, descending) ->
-            hideExplicitFlow.flatMapLatest { hideExplicit ->
-                when (playlist) {
-                    "liked" -> database.likedSongs(sortType, descending)
-                        .map { songs ->
-                            val filtered = if (hideExplicit) songs.filterNot { it.song.explicit == true } else songs
-                            filtered.reversed(descending)
-                        }
-
-                    "downloaded" -> downloadUtil.downloads.flatMapLatest { downloads ->
-                        database.allSongs()
-                            .flowOn(Dispatchers.IO)
-                            .map { songs ->
-                                songs.filter {
-                                    downloads[it.id]?.state == Download.STATE_COMPLETED
-                                }.let { downloaded ->
-                                    val explicitFiltered = if (hideExplicit) downloaded.filterNot { it.song.explicit == true } else downloaded
-                                    val sorted = when (sortType) {
-                                        SongSortType.CREATE_DATE -> explicitFiltered.sortedBy {
-                                            downloads[it.id]?.updateTimeMs ?: 0L
-                                        }
-
-                                        SongSortType.NAME -> explicitFiltered.sortedBy { it.song.title }
-
-                                        SongSortType.ARTIST -> explicitFiltered.sortedBy { song ->
-                                            song.song.artistName ?: song.artists.joinToString("") { it.name }
-                                        }
-
-                                        SongSortType.PLAY_TIME -> explicitFiltered.sortedBy { it.song.totalPlayTime }
-                                    }
-                                    sorted.reversed(descending)
-                                }
-                            }
+            when (playlist) {
+                "liked" -> database.likedSongs(sortType, descending)
+                    .map { songs ->
+                        val hideExplicit = hideExplicitState.value
+                        val filtered = if (hideExplicit) songs.filterNot { it.song.explicit == true } else songs
+                        filtered.reversed(descending)
                     }
 
-                    else -> MutableStateFlow(emptyList())
+                "downloaded" -> downloadUtil.downloads.flatMapLatest { downloads ->
+                    database.allSongs()
+                        .flowOn(Dispatchers.IO)
+                        .map { songs ->
+                            val downloaded = songs.filter {
+                                downloads[it.id]?.state == Download.STATE_COMPLETED
+                            }
+                            val hideExplicit = hideExplicitState.value
+                            val explicitFiltered = if (hideExplicit) downloaded.filterNot { it.song.explicit == true } else downloaded
+
+                            val sorted = when (sortType) {
+                                SongSortType.CREATE_DATE -> explicitFiltered.sortedBy {
+                                    downloads[it.id]?.updateTimeMs ?: 0L
+                                }
+
+                                SongSortType.NAME -> explicitFiltered.sortedBy { it.song.title }
+
+                                SongSortType.ARTIST -> explicitFiltered.sortedBy {
+                                    it.song.artistName ?: it.artists.joinToString("") { a -> a.name }
+                                }
+
+                                SongSortType.PLAY_TIME -> explicitFiltered.sortedBy { it.song.totalPlayTime }
+                            }
+
+                            sorted.reversed(descending)
+                        }
                 }
+
+                else -> MutableStateFlow(emptyList())
             }
         }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 

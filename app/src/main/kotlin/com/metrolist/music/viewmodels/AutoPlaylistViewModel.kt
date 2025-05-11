@@ -40,58 +40,61 @@ constructor(
     savedStateHandle: SavedStateHandle,
     private val syncUtils: SyncUtils,
 ) : ViewModel() {
+
     val playlist = savedStateHandle.get<String>("playlist")!!
 
-    private val hideExplicitFlow = context.dataStore.data
-        .map { it[HideExplicitKey] ?: false }
-        .distinctUntilChanged()
-
     val likedSongs =
-        context.dataStore.data
-            .map {
-                it[SongSortTypeKey].toEnum(SongSortType.CREATE_DATE) to (it[SongSortDescendingKey]
-                    ?: true)
-            }
-            .distinctUntilChanged()
-            .flatMapLatest { (sortType, descending) ->
-                hideExplicitFlow.flatMapLatest { hideExplicit ->
-                    when (playlist) {
-                        "liked" -> database.likedSongs(sortType, descending)
-                            .map { songs ->
-                                val filtered = if (hideExplicit) songs.filterNot { it.song.explicit == true } else songs
-                                filtered.reversed(descending)
-                            }
-
-                        "downloaded" -> downloadUtil.downloads.flatMapLatest { downloads ->
-                            database.allSongs()
-                                .flowOn(Dispatchers.IO)
-                                .map { songs ->
-                                    songs.filter {
-                                        downloads[it.id]?.state == Download.STATE_COMPLETED
-                                    }.let { downloaded ->
-                                        val explicitFiltered = if (hideExplicit) downloaded.filterNot { it.song.explicit == true } else downloaded
-                                        when (sortType) {
-                                            SongSortType.CREATE_DATE -> explicitFiltered.sortedBy {
-                                                downloads[it.id]?.updateTimeMs ?: 0L
-                                            }
-
-                                            SongSortType.NAME -> explicitFiltered.sortedBy { it.song.title }
-                                            SongSortType.ARTIST -> explicitFiltered.sortedBy { song ->
-                                                song.song.artistName ?: song.artists.joinToString("") { it.name }
-                                            }
-
-                                            SongSortType.PLAY_TIME -> explicitFiltered.sortedBy { it.song.totalPlayTime }
-                                        }.reversed(descending)
-                                    }
-                                }
+        combine(
+            context.dataStore.data.map {
+                it[SongSortTypeKey].toEnum(SongSortType.CREATE_DATE) to (it[SongSortDescendingKey] ?: true)
+            }.distinctUntilChanged(),
+            context.dataStore.data.map {
+                it[HideExplicitKey] ?: false
+            }.distinctUntilChanged()
+        ) { (sortType, descending), hideExplicit ->
+            Triple(sortType, descending, hideExplicit)
+        }
+            .flatMapLatest { (sortType, descending, hideExplicit) ->
+                when (playlist) {
+                    "liked" -> database.likedSongs(sortType, descending)
+                        .map { songs ->
+                            val filtered = if (hideExplicit) songs.filterNot { it.song.explicit == true } else songs
+                            filtered.reversed(descending)
                         }
 
-                        else -> MutableStateFlow(emptyList())
+                    "downloaded" -> downloadUtil.downloads.flatMapLatest { downloads ->
+                        database.allSongs()
+                            .flowOn(Dispatchers.IO)
+                            .map { songs ->
+                                songs.filter {
+                                    downloads[it.id]?.state == Download.STATE_COMPLETED
+                                }.let { downloaded ->
+                                    val explicitFiltered = if (hideExplicit) downloaded.filterNot { it.song.explicit == true } else downloaded
+                                    val sorted = when (sortType) {
+                                        SongSortType.CREATE_DATE -> explicitFiltered.sortedBy {
+                                            downloads[it.id]?.updateTimeMs ?: 0L
+                                        }
+
+                                        SongSortType.NAME -> explicitFiltered.sortedBy { it.song.title }
+
+                                        SongSortType.ARTIST -> explicitFiltered.sortedBy { song ->
+                                            song.song.artistName ?: song.artists.joinToString("") { it.name }
+                                        }
+
+                                        SongSortType.PLAY_TIME -> explicitFiltered.sortedBy { it.song.totalPlayTime }
+                                    }
+                                    sorted.reversed(descending)
+                                }
+                            }
                     }
+
+                    else -> MutableStateFlow(emptyList())
                 }
             }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     fun syncLikedSongs() {
-        viewModelScope.launch(Dispatchers.IO) { syncUtils.syncLikedSongs() }
+        viewModelScope.launch(Dispatchers.IO) {
+            syncUtils.syncLikedSongs()
+        }
     }
 }

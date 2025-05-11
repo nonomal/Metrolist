@@ -63,72 +63,78 @@ class LibrarySongsViewModel
 @Inject
 constructor(
     @ApplicationContext context: Context,
-    private val database: MusicDatabase,
-    private val downloadUtil: DownloadUtil,
+    database: MusicDatabase,
+    downloadUtil: DownloadUtil,
     private val syncUtils: SyncUtils,
 ) : ViewModel() {
 
-    private val hideExplicitFlow = context.dataStore.data
-        .map { it[HideExplicitKey] ?: false }
-        .distinctUntilChanged()
-
     val allSongs =
-        hideExplicitFlow.flatMapLatest { hideExplicit ->
-            context.dataStore.data
-                .map {
-                    Triple(
-                        it[SongFilterKey].toEnum(SongFilter.LIKED),
-                        it[SongSortTypeKey].toEnum(SongSortType.CREATE_DATE),
-                        (it[SongSortDescendingKey] ?: true),
-                    )
-                }.distinctUntilChanged()
-                .flatMapLatest { (filter, sortType, descending) ->
-                    val baseFlow = when (filter) {
+        context.dataStore.data
+            .map {
+                Triple(
+                    it[SongFilterKey].toEnum(SongFilter.LIKED),
+                    it[SongSortTypeKey].toEnum(SongSortType.CREATE_DATE),
+                    (it[SongSortDescendingKey] ?: true),
+                )
+            }.distinctUntilChanged()
+            .flatMapLatest { (filter, sortType, descending) ->
+                val hideExplicitFlow = context.dataStore.data
+                    .map { it[HideExplicitKey] ?: false }
+                    .distinctUntilChanged()
+
+                hideExplicitFlow.flatMapLatest { hideExplicit ->
+                    when (filter) {
                         SongFilter.LIBRARY -> database.songs(sortType, descending)
+                            .map { songs ->
+                                songs.filter { !hideExplicit || it.song.explicit != true }
+                            }
+
                         SongFilter.LIKED -> database.likedSongs(sortType, descending)
+                            .map { songs ->
+                                songs.filter { !hideExplicit || it.song.explicit != true }
+                            }
+
                         SongFilter.DOWNLOADED ->
                             downloadUtil.downloads.flatMapLatest { downloads ->
-                                database.allSongs().flowOn(Dispatchers.IO).map { songs ->
-                                    songs.filter {
-                                        downloads[it.id]?.state == Download.STATE_COMPLETED
-                                    }
-                                }
-                            }
-                    }
+                                database.allSongs()
+                                    .flowOn(Dispatchers.IO)
+                                    .map { songs ->
+                                        val filteredSongs = songs.filter {
+                                            downloads[it.id]?.state == Download.STATE_COMPLETED &&
+                                            (!hideExplicit || it.song.explicit != true)
+                                        }
 
-                    baseFlow.map { songs ->
-                        val filtered = if (hideExplicit) songs.filterNot { it.song.explicit == true } else songs
-                        when (sortType) {
-                            SongSortType.CREATE_DATE -> songs.sortedBy {
-                                downloads[it.id]?.updateTimeMs ?: 0L
-                            }
-                            SongSortType.NAME -> filtered.sortedBy { it.song.title }
-                            SongSortType.ARTIST -> {
-                                val collator = Collator.getInstance(Locale.getDefault()).apply {
-                                    strength = Collator.PRIMARY
-                                }
-                                filtered
-                                    .sortedWith(compareBy(collator) {
-                                        it.song.artistName ?: it.artists.joinToString("") { a -> a.name }
-                                    })
-                                    .groupBy { it.album?.title }
-                                    .flatMap { (_, group) ->
-                                        group.sortedBy { it.artists.joinToString("") { a -> a.name } }
+                                        val sorted = when (sortType) {
+                                            SongSortType.CREATE_DATE -> filteredSongs.sortedBy {
+                                                downloads[it.id]?.updateTimeMs ?: 0L
+                                            }
+
+                                            SongSortType.NAME -> filteredSongs.sortedBy { it.song.title }
+
+                                            SongSortType.ARTIST -> {
+                                                val collator = Collator.getInstance(Locale.getDefault()).apply {
+                                                    strength = Collator.PRIMARY
+                                                }
+                                                filteredSongs
+                                                    .sortedWith(compareBy(collator) {
+                                                        it.song.artistName ?: it.artists.joinToString("") { a -> a.name }
+                                                    })
+                                                    .groupBy { it.album?.title }
+                                                    .flatMap { (_, group) ->
+                                                        group.sortedBy { it.artists.joinToString("") { a -> a.name } }
+                                                    }
+                                            }
+
+                                            SongSortType.PLAY_TIME -> filteredSongs.sortedBy { it.song.totalPlayTime }
+                                        }
+
+                                        sorted.reversed(descending)
                                     }
                             }
-                            SongSortType.PLAY_TIME -> filtered.sortedBy { it.song.totalPlayTime }
-                        }.reversed(descending)
                     }
                 }
-        }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-
-    fun syncLikedSongs() {
-        viewModelScope.launch(Dispatchers.IO) { syncUtils.syncLikedSongs() }
-    }
-
-    fun syncLibrarySongs() {
-        viewModelScope.launch(Dispatchers.IO) { syncUtils.syncLibrarySongs() }
-    }
+            }
+            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 }
 
 @HiltViewModel

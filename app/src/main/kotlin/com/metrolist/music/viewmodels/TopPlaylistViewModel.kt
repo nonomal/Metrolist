@@ -11,10 +11,7 @@ import com.metrolist.music.utils.dataStore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.*
 import javax.inject.Inject
 
 @HiltViewModel
@@ -22,7 +19,7 @@ class TopPlaylistViewModel
 @Inject
 constructor(
     @ApplicationContext context: Context,
-    database: MusicDatabase,
+    private val database: MusicDatabase,
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
     val top = savedStateHandle.get<String>("top")!!
@@ -34,16 +31,12 @@ constructor(
         .distinctUntilChanged()
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val topSongs =
-        combine(
-            topPeriod,
-            hideExplicitFlow
-        ) { period, hideExplicit ->
-            period to hideExplicit
-        }.flatMapLatest { (period, hideExplicit) ->
+    val topSongs = hideExplicitFlow.flatMapLatest { hideExplicit ->
+        topPeriod.flatMapLatest { period ->
             database.mostPlayedSongs(period.toTimeMillis(), top.toInt())
                 .map { songs ->
                     if (hideExplicit) songs.filterNot { it.song.explicit == true } else songs
                 }
-        }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+        }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 }

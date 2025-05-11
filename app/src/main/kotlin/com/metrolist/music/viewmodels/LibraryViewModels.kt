@@ -133,8 +133,15 @@ constructor(
                             }
                     }
                 }
-            }
-            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+            }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    fun syncLikedSongs() {
+        viewModelScope.launch(Dispatchers.IO) { syncUtils.syncLikedSongs() }
+    }
+
+    fun syncLibrarySongs() {
+        viewModelScope.launch(Dispatchers.IO) { syncUtils.syncLibrarySongs() }
+    }
 }
 
 @HiltViewModel

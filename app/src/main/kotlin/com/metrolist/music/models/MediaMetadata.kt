@@ -69,6 +69,8 @@ fun Song.toMediaMetadata() =
                 title = song.albumName.orEmpty(),
             )
         },
+        explicit = song.explicit == true,
+        liked = song.liked,
     )
 
 fun SongItem.toMediaMetadata() =

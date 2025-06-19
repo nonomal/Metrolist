@@ -168,14 +168,15 @@ class CrossfadeManager(
         _crossfadeDuration.value = duration
     }
 
-    // تعديل هنا: لقبول مدة الأغنية التالية
     fun startCrossfade(nextMediaItem: MediaItem, nextMediaDuration: Long) {
+        // تأكد من عدم وجود secondaryPlayer يعمل مسبقًا!
+        release()
+
         if (!crossfadeEnabled.value || isCrossfading) return
 
         isCrossfading = true
         crossfadeJob?.cancel()
 
-        // يبدأ secondaryPlayer من (0, أو duration - crossfadeDuration)
         val startPosition = maxOf(0L, nextMediaDuration - crossfadeDuration.value * 1000L)
 
         secondaryPlayer = createSecondaryPlayer().apply {
@@ -212,13 +213,23 @@ class CrossfadeManager(
         primaryPlayer.pause()
         primaryPlayer.volume = 1f
 
-        // لا حاجة لنقل الحالة، secondaryPlayer يكمل
-        secondaryPlayer?.let { secondary ->
-            // يمكنك هنا إعلام MusicService أن الـ player الرئيسي أصبح هو secondaryPlayer إذا أردت
-            // أو فقط اترك secondaryPlayer يعمل وانتهى
-            // secondaryPlayer = null // إذا أردت تنظيف المرجع فقط
+        // الأهم: تأكد من تحرير secondaryPlayer كي لا يتداخل الصوت
+        secondaryPlayer?.let {
+            it.release()
+            secondaryPlayer = null
         }
 
+        isCrossfading = false
+    }
+
+    fun release() {
+        crossfadeJob?.cancel()
+        crossfadeJob = null
+        secondaryPlayer?.let {
+            it.stop()
+            it.release()
+            secondaryPlayer = null
+        }
         isCrossfading = false
     }
 
@@ -243,12 +254,6 @@ class CrossfadeManager(
         val timeRemaining = duration - currentPosition
 
         return timeRemaining <= crossfadeDurationMs && timeRemaining > 0
-    }
-
-    fun release() {
-        crossfadeJob?.cancel()
-        secondaryPlayer?.release()
-        secondaryPlayer = null
     }
 }
 
@@ -527,32 +532,33 @@ class MusicService :
     }
 
     private fun startCrossfadeMonitoring() {
-        crossfadeCheckJob = scope.launch {
-            while (isActive) {
-                if (player.isPlaying && player.hasNextMediaItem()) {
-                    val currentPosition = player.currentPosition
-                    val duration = player.duration
+    crossfadeCheckJob = scope.launch {
+        while (isActive) {
+            if (player.isPlaying && player.hasNextMediaItem()) {
+                val currentPosition = player.currentPosition
+                val duration = player.duration
 
-                    if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
-                        val nextIndex = player.currentMediaItemIndex + 1
-                        val nextMediaItem = player.getMediaItemAt(nextIndex)
+                if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
+                    val nextIndex = player.currentMediaItemIndex + 1
+                    val nextMediaItem = player.getMediaItemAt(nextIndex)
 
-                        val timeline = player.currentTimeline
-                        val nextMediaDuration = if (!timeline.isEmpty && nextIndex < timeline.windowCount) {
-                            val window = Timeline.Window()
-                            timeline.getWindow(nextIndex, window)
-                            window.durationMs
-                        } else {
-                            180_000L
-                        }
-
-                        crossfadeManager.startCrossfade(nextMediaItem, nextMediaDuration)
+                    // الحصول على مدة الأغنية التالية عبر timeline
+                    val timeline = player.currentTimeline
+                    val nextMediaDuration = if (!timeline.isEmpty && nextIndex < timeline.windowCount) {
+                        val window = Timeline.Window()
+                        timeline.getWindow(nextIndex, window)
+                        window.durationMs
+                    } else {
+                        180_000L // مدة افتراضية (3 دقائق)
                     }
+
+                    crossfadeManager.startCrossfade(nextMediaItem, nextMediaDuration)
                 }
-                delay(500)
             }
+            delay(500) // افحص كل نصف ثانية
         }
     }
+}
 
     private fun updateNotification() {
         mediaSession.setCustomLayout(
@@ -645,6 +651,8 @@ class MusicService :
         queue: Queue,
         playWhenReady: Boolean = true,
     ) {
+        crossfadeManager.release()
+
         if (!scope.isActive) scope = CoroutineScope(Dispatchers.Main) + Job()
         currentQueue = queue
         queueTitle = null
@@ -694,6 +702,9 @@ class MusicService :
     }
 
     fun startRadioSeamlessly() {
+
+        crossfadeManager.release()
+
         val currentMediaMetadata = player.currentMetadata ?: return
         if (player.currentMediaItemIndex > 0) player.removeMediaItems(
             0,
@@ -773,6 +784,9 @@ class MusicService :
     }
 
     fun playNext(items: List<MediaItem>) {
+
+        crossfadeManager.release()
+
         player.addMediaItems(
             if (player.mediaItemCount == 0) 0 else player.currentMediaItemIndex + 1,
             items
@@ -1121,6 +1135,9 @@ class MusicService :
     }
 
     override fun onDestroy() {
+
+        crossfadeManager.release()
+
         if (dataStore.get(PersistentQueueKey, true)) {
             saveQueueToDisk()
         }

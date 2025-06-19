@@ -319,7 +319,7 @@ class MusicService :
     lateinit var downloadCache: SimpleCache
 
     lateinit var player: ExoPlayer
-    private lateinit var mediaSession: MediaLibrarySession
+    lateinit var mediaSession: MediaLibrarySession
 
     private var isAudioEffectSessionOpened = false
 
@@ -328,7 +328,7 @@ class MusicService :
     val automixItems = MutableStateFlow<List<MediaItem>>(emptyList())
 
     // Crossfade variables
-    private lateinit var crossfadeManager: CrossfadeManager
+    lateinit var crossfadeManager: CrossfadeManager
     private var crossfadeCheckJob: Job? = null
 
     override fun onCreate() {

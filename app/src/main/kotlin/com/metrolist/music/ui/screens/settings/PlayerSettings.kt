@@ -43,6 +43,8 @@ import com.metrolist.music.constants.AudioQualityKey
 import com.metrolist.music.constants.AutoDownloadOnLikeKey
 import com.metrolist.music.constants.AutoLoadMoreKey
 import com.metrolist.music.constants.AutoSkipNextOnErrorKey
+import com.metrolist.music.constants.CrossfadeEnabledKey
+import com.metrolist.music.constants.CrossfadeDurationKey
 import com.metrolist.music.constants.PersistentQueueKey
 import com.metrolist.music.constants.SimilarContent
 import com.metrolist.music.constants.SkipSilenceKey
@@ -104,6 +106,16 @@ fun PlayerSettings(
         HistoryDuration,
         defaultValue = 30f
     )
+    
+    // Crossfade preferences
+    val (crossfadeEnabled, onCrossfadeEnabledChange) = rememberPreference(
+        CrossfadeEnabledKey,
+        defaultValue = false
+    )
+    val (crossfadeDuration, onCrossfadeDurationChange) = rememberPreference(
+        CrossfadeDurationKey,
+        defaultValue = 3
+    )
 
     Column(
         Modifier
@@ -156,6 +168,29 @@ fun PlayerSettings(
             checked = audioNormalization,
             onCheckedChange = onAudioNormalizationChange
         )
+
+        // Crossfade Settings
+        SwitchPreference(
+            title = { Text("Crossfade") },
+            description = "Smooth transition between songs",
+            icon = { Icon(painterResource(R.drawable.shuffle), null) },
+            checked = crossfadeEnabled,
+            onCheckedChange = onCrossfadeEnabledChange
+        )
+
+        if (crossfadeEnabled) {
+            SliderPreference(
+                title = { Text("Crossfade Duration") },
+                description = "${crossfadeDuration}s",
+                icon = { Icon(painterResource(R.drawable.timer), null) },
+                value = crossfadeDuration.toFloat(),
+                onValueChange = { value ->
+                    onCrossfadeDurationChange(value.roundToInt())
+                },
+                valueRange = 1f..10f,
+                steps = 8
+            )
+        }
 
         PreferenceGroupTitle(
             title = stringResource(R.string.queue)

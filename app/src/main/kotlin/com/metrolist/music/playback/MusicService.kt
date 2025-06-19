@@ -9,6 +9,7 @@ import android.content.Intent
 import android.database.SQLException
 import android.media.audiofx.AudioEffect
 import android.net.ConnectivityManager
+import android.os.Binder
 import androidx.core.content.getSystemService
 import androidx.core.net.toUri
 import androidx.datastore.preferences.core.edit
@@ -17,7 +18,12 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.common.Player.*
+import androidx.media3.common.Player.EVENT_POSITION_DISCONTINUITY
+import androidx.media3.common.Player.EVENT_TIMELINE_CHANGED
+import androidx.media3.common.Player.REPEAT_MODE_ALL
+import androidx.media3.common.Player.REPEAT_MODE_OFF
+import androidx.media3.common.Player.REPEAT_MODE_ONE
+import androidx.media3.common.Player.STATE_IDLE
 import androidx.media3.common.Timeline
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.datasource.DataSource
@@ -51,20 +57,82 @@ import com.metrolist.innertube.models.SongItem
 import com.metrolist.innertube.models.WatchEndpoint
 import com.metrolist.music.MainActivity
 import com.metrolist.music.R
-import com.metrolist.music.constants.*
+import com.metrolist.music.constants.AudioNormalizationKey
+import com.metrolist.music.constants.AudioQualityKey
+import com.metrolist.music.constants.AutoLoadMoreKey
+import com.metrolist.music.constants.AutoDownloadOnLikeKey
+import com.metrolist.music.constants.AutoSkipNextOnErrorKey
+import com.metrolist.music.constants.CrossfadeEnabledKey
+import com.metrolist.music.constants.CrossfadeDurationKey
+import com.metrolist.music.constants.DiscordTokenKey
+import com.metrolist.music.constants.EnableDiscordRPCKey
+import com.metrolist.music.constants.HideExplicitKey
+import com.metrolist.music.constants.HistoryDuration
+import com.metrolist.music.constants.MediaSessionConstants.CommandToggleLike
+import com.metrolist.music.constants.MediaSessionConstants.CommandToggleRepeatMode
+import com.metrolist.music.constants.MediaSessionConstants.CommandToggleShuffle
+import com.metrolist.music.constants.PauseListenHistoryKey
+import com.metrolist.music.constants.PersistentQueueKey
+import com.metrolist.music.constants.PlayerVolumeKey
+import com.metrolist.music.constants.RepeatModeKey
+import com.metrolist.music.constants.ShowLyricsKey
+import com.metrolist.music.constants.SimilarContent
+import com.metrolist.music.constants.SkipSilenceKey
 import com.metrolist.music.db.MusicDatabase
-import com.metrolist.music.db.entities.*
+import com.metrolist.music.db.entities.Event
+import com.metrolist.music.db.entities.FormatEntity
+import com.metrolist.music.db.entities.LyricsEntity
+import com.metrolist.music.db.entities.RelatedSongMap
 import com.metrolist.music.di.DownloadCache
 import com.metrolist.music.di.PlayerCache
-import com.metrolist.music.extensions.*
+import com.metrolist.music.extensions.SilentHandler
+import com.metrolist.music.extensions.collect
+import com.metrolist.music.extensions.collectLatest
+import com.metrolist.music.extensions.currentMetadata
+import com.metrolist.music.extensions.findNextMediaItemById
+import com.metrolist.music.extensions.mediaItems
+import com.metrolist.music.extensions.metadata
+import com.metrolist.music.extensions.toMediaItem
 import com.metrolist.music.lyrics.LyricsHelper
 import com.metrolist.music.models.PersistQueue
 import com.metrolist.music.models.toMediaMetadata
-import com.metrolist.music.playback.queues.*
-import com.metrolist.music.utils.*
+import com.metrolist.music.playback.queues.EmptyQueue
+import com.metrolist.music.playback.queues.ListQueue
+import com.metrolist.music.playback.queues.Queue
+import com.metrolist.music.playback.queues.YouTubeQueue
+import com.metrolist.music.playback.queues.filterExplicit
+import com.metrolist.music.utils.CoilBitmapLoader
+import com.metrolist.music.utils.DiscordRPC
+import com.metrolist.music.utils.SyncUtils
+import com.metrolist.music.utils.YTPlayerUtils
+import com.metrolist.music.utils.dataStore
+import com.metrolist.music.utils.enumPreference
+import com.metrolist.music.utils.get
+import com.metrolist.music.utils.isInternetAvailable
+import com.metrolist.music.utils.reportException
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.io.ObjectInputStream
 import java.io.ObjectOutputStream
@@ -77,7 +145,7 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.time.Duration.Companion.seconds
 
-// --- CrossfadeManager ---
+// CrossfadeManager Class
 class CrossfadeManager(
     private val scope: CoroutineScope,
     private val primaryPlayer: ExoPlayer,
@@ -100,15 +168,20 @@ class CrossfadeManager(
         _crossfadeDuration.value = duration
     }
 
-    fun startCrossfade(nextMediaItem: MediaItem) {
+    // تعديل هنا: لقبول مدة الأغنية التالية
+    fun startCrossfade(nextMediaItem: MediaItem, nextMediaDuration: Long) {
         if (!crossfadeEnabled.value || isCrossfading) return
 
         isCrossfading = true
         crossfadeJob?.cancel()
 
+        // يبدأ secondaryPlayer من (0, أو duration - crossfadeDuration)
+        val startPosition = maxOf(0L, nextMediaDuration - crossfadeDuration.value * 1000L)
+
         secondaryPlayer = createSecondaryPlayer().apply {
             setMediaItem(nextMediaItem)
             prepare()
+            seekTo(startPosition)
             volume = 0f
             playWhenReady = true
         }
@@ -137,18 +210,13 @@ class CrossfadeManager(
 
     private fun completeCrossfade() {
         primaryPlayer.pause()
+        primaryPlayer.volume = 1f
 
+        // لا حاجة لنقل الحالة، secondaryPlayer يكمل
         secondaryPlayer?.let { secondary ->
-            val currentPosition = secondary.currentPosition
-            val mediaItem = secondary.currentMediaItem
-
-            primaryPlayer.setMediaItem(mediaItem!!)
-            primaryPlayer.seekTo(currentPosition)
-            primaryPlayer.volume = 1f
-            primaryPlayer.playWhenReady = true
-
-            secondary.release()
-            secondaryPlayer = null
+            // يمكنك هنا إعلام MusicService أن الـ player الرئيسي أصبح هو secondaryPlayer إذا أردت
+            // أو فقط اترك secondaryPlayer يعمل وانتهى
+            // secondaryPlayer = null // إذا أردت تنظيف المرجع فقط
         }
 
         isCrossfading = false
@@ -184,25 +252,33 @@ class CrossfadeManager(
     }
 }
 
-// --- MusicService ---
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 @AndroidEntryPoint
 class MusicService :
     MediaLibraryService(),
     Player.Listener,
     PlaybackStatsListener.Callback {
+    @Inject
+    lateinit var database: MusicDatabase
 
-    @Inject lateinit var database: MusicDatabase
-    @Inject lateinit var lyricsHelper: LyricsHelper
-    @Inject lateinit var syncUtils: SyncUtils
-    @Inject lateinit var mediaLibrarySessionCallback: MediaLibrarySessionCallback
+    @Inject
+    lateinit var lyricsHelper: LyricsHelper
+    
+    @Inject
+    lateinit var syncUtils: SyncUtils
+
+    @Inject
+    lateinit var mediaLibrarySessionCallback: MediaLibrarySessionCallback
 
     private var scope = CoroutineScope(Dispatchers.Main) + Job()
     private val binder = MusicBinder()
+
     private lateinit var connectivityManager: ConnectivityManager
 
     private val audioQuality by enumPreference(
-        this, AudioQualityKey, com.metrolist.music.constants.AudioQuality.AUTO
+        this,
+        AudioQualityKey,
+        com.metrolist.music.constants.AudioQuality.AUTO
     )
 
     private var currentQueue: Queue = EmptyQueue
@@ -210,9 +286,10 @@ class MusicService :
 
     val currentMediaMetadata = MutableStateFlow<com.metrolist.music.models.MediaMetadata?>(null)
     private val currentSong =
-        currentMediaMetadata.flatMapLatest { mediaMetadata ->
-            database.song(mediaMetadata?.id)
-        }.stateIn(scope, SharingStarted.Lazily, null)
+        currentMediaMetadata
+            .flatMapLatest { mediaMetadata ->
+                database.song(mediaMetadata?.id)
+            }.stateIn(scope, SharingStarted.Lazily, null)
     private val currentFormat =
         currentMediaMetadata.flatMapLatest { mediaMetadata ->
             database.format(mediaMetadata?.id)
@@ -223,13 +300,19 @@ class MusicService :
 
     lateinit var sleepTimer: SleepTimer
 
-    @Inject @PlayerCache lateinit var playerCache: SimpleCache
-    @Inject @DownloadCache lateinit var downloadCache: SimpleCache
+    @Inject
+    @PlayerCache
+    lateinit var playerCache: SimpleCache
+
+    @Inject
+    @DownloadCache
+    lateinit var downloadCache: SimpleCache
 
     lateinit var player: ExoPlayer
     private lateinit var mediaSession: MediaLibrarySession
 
     private var isAudioEffectSessionOpened = false
+
     private var discordRpc: DiscordRPC? = null
 
     val automixItems = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -242,32 +325,38 @@ class MusicService :
         super.onCreate()
         setMediaNotificationProvider(
             DefaultMediaNotificationProvider(
-                this, { NOTIFICATION_ID }, CHANNEL_ID, R.string.music_player
-            ).apply {
-                setSmallIcon(R.drawable.small_icon)
-            }
-        )
-        player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(createMediaSourceFactory())
-            .setRenderersFactory(createRenderersFactory())
-            .setHandleAudioBecomingNoisy(true)
-            .setWakeMode(C.WAKE_MODE_NETWORK)
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                    .build(),
-                true
+                this,
+                { NOTIFICATION_ID },
+                CHANNEL_ID,
+                R.string.music_player
             )
-            .setSeekBackIncrementMs(5000)
-            .setSeekForwardIncrementMs(5000)
-            .build()
-            .apply {
-                addListener(this@MusicService)
-                sleepTimer = SleepTimer(scope, this)
-                addListener(sleepTimer)
-                addAnalyticsListener(PlaybackStatsListener(false, this@MusicService))
-            }
+                .apply {
+                    setSmallIcon(R.drawable.small_icon)
+                },
+        )
+        player =
+            ExoPlayer
+                .Builder(this)
+                .setMediaSourceFactory(createMediaSourceFactory())
+                .setRenderersFactory(createRenderersFactory())
+                .setHandleAudioBecomingNoisy(true)
+                .setWakeMode(C.WAKE_MODE_NETWORK)
+                .setAudioAttributes(
+                    AudioAttributes
+                        .Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                        .build(),
+                    true,
+                ).setSeekBackIncrementMs(5000)
+                .setSeekForwardIncrementMs(5000)
+                .build()
+                .apply {
+                    addListener(this@MusicService)
+                    sleepTimer = SleepTimer(scope, this)
+                    addListener(sleepTimer)
+                    addAnalyticsListener(PlaybackStatsListener(false, this@MusicService))
+                }
 
         // Initialize CrossfadeManager
         crossfadeManager = CrossfadeManager(
@@ -282,13 +371,18 @@ class MusicService :
             toggleLike = ::toggleLike
             toggleLibrary = ::toggleLibrary
         }
-        mediaSession = MediaLibrarySession.Builder(this, player, mediaLibrarySessionCallback)
-            .setSessionActivity(
-                PendingIntent.getActivity(
-                    this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
-                )
-            ).setBitmapLoader(CoilBitmapLoader(this, scope))
-            .build()
+        mediaSession =
+            MediaLibrarySession
+                .Builder(this, player, mediaLibrarySessionCallback)
+                .setSessionActivity(
+                    PendingIntent.getActivity(
+                        this,
+                        0,
+                        Intent(this, MainActivity::class.java),
+                        PendingIntent.FLAG_IMMUTABLE,
+                    ),
+                ).setBitmapLoader(CoilBitmapLoader(this, scope))
+                .build()
         player.repeatMode = dataStore.get(RepeatModeKey, REPEAT_MODE_OFF)
 
         // Keep a connected controller so that notification works
@@ -325,10 +419,17 @@ class MusicService :
         ) { mediaMetadata, showLyrics ->
             mediaMetadata to showLyrics
         }.collectLatest(scope) { (mediaMetadata, showLyrics) ->
-            if (showLyrics && mediaMetadata != null && database.lyrics(mediaMetadata.id).first() == null) {
+            if (showLyrics && mediaMetadata != null && database.lyrics(mediaMetadata.id)
+                    .first() == null
+            ) {
                 val lyrics = lyricsHelper.getLyrics(mediaMetadata)
                 database.query {
-                    upsert(LyricsEntity(id = mediaMetadata.id, lyrics = lyrics))
+                    upsert(
+                        LyricsEntity(
+                            id = mediaMetadata.id,
+                            lyrics = lyrics,
+                        ),
+                    )
                 }
             }
         }
@@ -390,7 +491,8 @@ class MusicService :
                 }
             }.onSuccess { queue ->
                 playQueue(
-                    queue = ListQueue(
+                    queue =
+                    ListQueue(
                         title = queue.title,
                         items = queue.items.map { it.toMediaItem() },
                         startIndex = queue.mediaItemIndex,
@@ -424,15 +526,6 @@ class MusicService :
         }
     }
 
-    override fun onDestroy() {
-        crossfadeManager.release()
-        crossfadeCheckJob?.cancel()
-        player.release()
-        discordRpc?.closeRPC()
-        scope.cancel()
-        super.onDestroy()
-    }
-
     private fun startCrossfadeMonitoring() {
         crossfadeCheckJob = scope.launch {
             while (isActive) {
@@ -441,22 +534,15 @@ class MusicService :
                     val duration = player.duration
                     
                     if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
-                        val nextMediaItem = player.getMediaItemAt(player.currentMediaItemIndex + 1)
-                        
-                        // التأكد من أن الأغنية التالية محملة في الكاش
-                        scope.launch(Dispatchers.IO) {
-                            try {
-                                // محاولة تحميل مسبق للأغنية التالية
-                                recoverSong(nextMediaItem.mediaId)
-                            } catch (e: Exception) {
-                                // تجاهل الأخطاء في التحميل المسبق
-                            }
-                        }
-                        
-                        crossfadeManager.startCrossfade(nextMediaItem)
+                        val nextIndex = player.currentMediaItemIndex + 1
+                        val nextMediaItem = player.getMediaItemAt(nextIndex)
+                        val nextMediaDuration = nextMediaItem.mediaMetadata.duration
+                            ?:  player.getDuration()
+
+                        crossfadeManager.startCrossfade(nextMediaItem, nextMediaDuration)
                     }
                 }
-                delay(250) // فحص أكثر تكراراً
+                delay(500) // Check every half second
             }
         }
     }

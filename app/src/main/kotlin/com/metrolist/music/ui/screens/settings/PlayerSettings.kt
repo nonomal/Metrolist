@@ -179,17 +179,50 @@ fun PlayerSettings(
         )
 
         if (crossfadeEnabled) {
-            SliderPreference(
-                title = { Text("Crossfade Duration") },
-                description = "${crossfadeDuration}s",
-                icon = { Icon(painterResource(R.drawable.timer), null) },
-                value = crossfadeDuration.toFloat(),
-                onValueChange = { value ->
-                    onCrossfadeDurationChange(value.roundToInt())
-                },
-                valueRange = 1f..10f,
-                steps = 8
-            )
+            // Custom Crossfade Duration Slider
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.access_time),
+                            contentDescription = null,
+                            modifier = Modifier.padding(end = 16.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "Crossfade Duration",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = "${crossfadeDuration}s",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                Slider(
+                    value = crossfadeDuration.toFloat(),
+                    onValueChange = { value ->
+                        onCrossfadeDurationChange(value.roundToInt())
+                    },
+                    valueRange = 1f..10f,
+                    steps = 8,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 40.dp)
+                )
+            }
         }
 
         PreferenceGroupTitle(

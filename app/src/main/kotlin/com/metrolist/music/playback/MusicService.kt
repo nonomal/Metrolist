@@ -439,20 +439,640 @@ class MusicService :
                 if (player.isPlaying && player.hasNextMediaItem()) {
                     val currentPosition = player.currentPosition
                     val duration = player.duration
-
+                    
                     if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
                         val nextMediaItem = player.getMediaItemAt(player.currentMediaItemIndex + 1)
+                        
+                        // التأكد من أن الأغنية التالية محملة في الكاش
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                // محاولة تحميل مسبق للأغنية التالية
+                                recoverSong(nextMediaItem.mediaId)
+                            } catch (e: Exception) {
+                                // تجاهل الأخطاء في التحميل المسبق
+                            }
+                        }
+                        
                         crossfadeManager.startCrossfade(nextMediaItem)
                     }
                 }
-                delay(500) // Check every half second
+                delay(250) // فحص أكثر تكراراً
             }
         }
     }
 
-    // ... (rest of your MusicService code remains unchanged, including playQueue, toggleLike, etc.)
-    // For brevity, only the changed and improved sections are shown above.
-    // Copy your remaining methods as they are unless you want further refactoring.
+    private fun updateNotification() {
+        mediaSession.setCustomLayout(
+            listOf(
+                CommandButton
+                    .Builder()
+                    .setDisplayName(
+                        getString(
+                            if (currentSong.value?.song?.liked ==
+                                true
+                            ) {
+                                R.string.action_remove_like
+                            } else {
+                                R.string.action_like
+                            },
+                        ),
+                    )
+                    .setIconResId(if (currentSong.value?.song?.liked == true) R.drawable.favorite else R.drawable.favorite_border)
+                    .setSessionCommand(CommandToggleLike)
+                    .setEnabled(currentSong.value != null)
+                    .build(),
+                CommandButton
+                    .Builder()
+                    .setDisplayName(
+                        getString(
+                            when (player.repeatMode) {
+                                REPEAT_MODE_OFF -> R.string.repeat_mode_off
+                                REPEAT_MODE_ONE -> R.string.repeat_mode_one
+                                REPEAT_MODE_ALL -> R.string.repeat_mode_all
+                                else -> throw IllegalStateException()
+                            },
+                        ),
+                    ).setIconResId(
+                        when (player.repeatMode) {
+                            REPEAT_MODE_OFF -> R.drawable.repeat
+                            REPEAT_MODE_ONE -> R.drawable.repeat_one_on
+                            REPEAT_MODE_ALL -> R.drawable.repeat_on
+                            else -> throw IllegalStateException()
+                        },
+                    ).setSessionCommand(CommandToggleRepeatMode)
+                    .build(),
+                CommandButton
+                    .Builder()
+                    .setDisplayName(getString(if (player.shuffleModeEnabled) R.string.action_shuffle_off else R.string.action_shuffle_on))
+                    .setIconResId(if (player.shuffleModeEnabled) R.drawable.shuffle_on else R.drawable.shuffle)
+                    .setSessionCommand(CommandToggleShuffle)
+                    .build(),
+            ),
+        )
+    }
 
-    // Helper functions for creating factories, toggling like, etc., remain as in your original code.
+    private suspend fun recoverSong(
+        mediaId: String,
+        playbackData: YTPlayerUtils.PlaybackData? = null
+    ) {
+        val song = database.song(mediaId).first()
+        val mediaMetadata = withContext(Dispatchers.Main) {
+            player.findNextMediaItemById(mediaId)?.metadata
+        } ?: return
+        val duration = song?.song?.duration?.takeIf { it != -1 }
+            ?: mediaMetadata.duration.takeIf { it != -1 }
+            ?: (playbackData?.videoDetails ?: YTPlayerUtils.playerResponseForMetadata(mediaId)
+                .getOrNull()?.videoDetails)?.lengthSeconds?.toInt()
+            ?: -1
+        database.query {
+            if (song == null) insert(mediaMetadata.copy(duration = duration))
+            else if (song.song.duration == -1) update(song.song.copy(duration = duration))
+        }
+        if (!database.hasRelatedSongs(mediaId)) {
+            val relatedEndpoint =
+                YouTube.next(WatchEndpoint(videoId = mediaId)).getOrNull()?.relatedEndpoint
+                    ?: return
+            val relatedPage = YouTube.related(relatedEndpoint).getOrNull() ?: return
+            database.query {
+                relatedPage.songs
+                    .map(SongItem::toMediaMetadata)
+                    .onEach(::insert)
+                    .map {
+                        RelatedSongMap(
+                            songId = mediaId,
+                            relatedSongId = it.id
+                        )
+                    }
+                    .forEach(::insert)
+            }
+        }
+    }
+
+    fun playQueue(
+        queue: Queue,
+        playWhenReady: Boolean = true,
+    ) {
+        if (!scope.isActive) scope = CoroutineScope(Dispatchers.Main) + Job()
+        currentQueue = queue
+        queueTitle = null
+        player.shuffleModeEnabled = false
+        if (queue.preloadItem != null) {
+            player.setMediaItem(queue.preloadItem!!.toMediaItem())
+            player.prepare()
+            player.playWhenReady = playWhenReady
+        }
+        scope.launch(SilentHandler) {
+            val initialStatus =
+                withContext(Dispatchers.IO) {
+                    queue.getInitialStatus().filterExplicit(dataStore.get(HideExplicitKey, false))
+                }
+            if (queue.preloadItem != null && player.playbackState == STATE_IDLE) return@launch
+            if (initialStatus.title != null) {
+                queueTitle = initialStatus.title
+            }
+            if (initialStatus.items.isEmpty()) return@launch
+            if (queue.preloadItem != null) {
+                player.addMediaItems(
+                    0,
+                    initialStatus.items.subList(0, initialStatus.mediaItemIndex)
+                )
+                player.addMediaItems(
+                    initialStatus.items.subList(
+                        initialStatus.mediaItemIndex + 1,
+                        initialStatus.items.size
+                    )
+                )
+            } else {
+                player.setMediaItems(
+                    initialStatus.items,
+                    if (initialStatus.mediaItemIndex >
+                        0
+                    ) {
+                        initialStatus.mediaItemIndex
+                    } else {
+                        0
+                    },
+                    initialStatus.position,
+                )
+                player.prepare()
+                player.playWhenReady = playWhenReady
+            }
+        }
+    }
+
+    fun startRadioSeamlessly() {
+        val currentMediaMetadata = player.currentMetadata ?: return
+        if (player.currentMediaItemIndex > 0) player.removeMediaItems(
+            0,
+            player.currentMediaItemIndex
+        )
+        if (player.currentMediaItemIndex <
+            player.mediaItemCount - 1
+        ) {
+            player.removeMediaItems(player.currentMediaItemIndex + 1, player.mediaItemCount)
+        }
+        scope.launch(SilentHandler) {
+            val radioQueue =
+                YouTubeQueue(endpoint = WatchEndpoint(videoId = currentMediaMetadata.id))
+            val initialStatus = radioQueue.getInitialStatus()
+            if (initialStatus.title != null) {
+                queueTitle = initialStatus.title
+            }
+            player.addMediaItems(initialStatus.items.drop(1))
+            currentQueue = radioQueue
+        }
+    }
+
+    fun getAutomixAlbum(albumId: String) {
+        scope.launch(SilentHandler) {
+            YouTube
+                .album(albumId)
+                .onSuccess {
+                    getAutomix(it.album.playlistId)
+                }
+        }
+    }
+
+    fun getAutomix(playlistId: String) {
+        if (dataStore[SimilarContent] == true) {
+            scope.launch(SilentHandler) {
+                YouTube
+                    .next(WatchEndpoint(playlistId = playlistId))
+                    .onSuccess {
+                        YouTube
+                            .next(WatchEndpoint(playlistId = it.endpoint.playlistId))
+                            .onSuccess {
+                                automixItems.value =
+                                    it.items.map { song ->
+                                        song.toMediaItem()
+                                    }
+                            }
+                    }
+            }
+        }
+    }
+
+    fun addToQueueAutomix(
+        item: MediaItem,
+        position: Int,
+    ) {
+        automixItems.value =
+            automixItems.value.toMutableList().apply {
+                removeAt(position)
+            }
+        addToQueue(listOf(item))
+    }
+
+    fun playNextAutomix(
+        item: MediaItem,
+        position: Int,
+    ) {
+        automixItems.value =
+            automixItems.value.toMutableList().apply {
+                removeAt(position)
+            }
+        playNext(listOf(item))
+    }
+
+    fun clearAutomix() {
+        filesDir.resolve(PERSISTENT_QUEUE_FILE).delete()
+        automixItems.value = emptyList()
+    }
+
+    fun playNext(items: List<MediaItem>) {
+        player.addMediaItems(
+            if (player.mediaItemCount == 0) 0 else player.currentMediaItemIndex + 1,
+            items
+        )
+        player.prepare()
+    }
+
+    fun addToQueue(items: List<MediaItem>) {
+        player.addMediaItems(items)
+        player.prepare()
+    }
+
+    private fun toggleLibrary() {
+        database.query {
+            currentSong.value?.let {
+                update(it.song.toggleLibrary())
+            }
+        }
+    }
+
+    fun toggleLike() {
+         database.query {
+             currentSong.value?.let {
+                 val song = it.song.toggleLike()
+                 update(song)
+                 syncUtils.likeSong(song)
+
+                 // Check if auto-download on like is enabled and the song is now liked
+                 if (dataStore.get(AutoDownloadOnLikeKey, false) && song.liked) {
+                     // Trigger download for the liked song
+                     val downloadRequest = androidx.media3.exoplayer.offline.DownloadRequest
+                         .Builder(song.id, song.id.toUri())
+                         .setCustomCacheKey(song.id)
+                         .setData(song.title.toByteArray())
+                         .build()
+                     androidx.media3.exoplayer.offline.DownloadService.sendAddDownload(
+                         this@MusicService,
+                         ExoDownloadService::class.java,
+                         downloadRequest,
+                         false
+                     )
+                 }
+             }
+         }
+     }
+
+    private fun openAudioEffectSession() {
+        if (isAudioEffectSessionOpened) return
+        isAudioEffectSessionOpened = true
+        sendBroadcast(
+            Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, player.audioSessionId)
+                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+                putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
+            },
+        )
+    }
+
+    private fun closeAudioEffectSession() {
+        if (!isAudioEffectSessionOpened) return
+        isAudioEffectSessionOpened = false
+        sendBroadcast(
+            Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, player.audioSessionId)
+                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+            },
+        )
+    }
+
+    override fun onMediaItemTransition(
+        mediaItem: MediaItem?,
+        reason: Int,
+    ) {
+        // Auto load more songs
+        if (dataStore.get(AutoLoadMoreKey, true) &&
+            reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
+            player.mediaItemCount - player.currentMediaItemIndex <= 5 &&
+            currentQueue.hasNextPage()
+        ) {
+            scope.launch(SilentHandler) {
+                val mediaItems =
+                    currentQueue.nextPage().filterExplicit(dataStore.get(HideExplicitKey, false))
+                if (player.playbackState != STATE_IDLE) {
+                    player.addMediaItems(mediaItems.drop(1))
+                }
+            }
+        }
+    }
+
+    override fun onPlaybackStateChanged(
+        @Player.State playbackState: Int,
+    ) {
+        if (playbackState == STATE_IDLE) {
+            currentQueue = EmptyQueue
+            player.shuffleModeEnabled = false
+            queueTitle = null
+        }
+    }
+
+    override fun onEvents(
+        player: Player,
+        events: Player.Events,
+    ) {
+        if (events.containsAny(
+                Player.EVENT_PLAYBACK_STATE_CHANGED,
+                Player.EVENT_PLAY_WHEN_READY_CHANGED
+            )
+        ) {
+            val isBufferingOrReady =
+                player.playbackState == Player.STATE_BUFFERING || player.playbackState == Player.STATE_READY
+            if (isBufferingOrReady && player.playWhenReady) {
+                openAudioEffectSession()
+            } else {
+                closeAudioEffectSession()
+            }
+        }
+        if (events.containsAny(EVENT_TIMELINE_CHANGED, EVENT_POSITION_DISCONTINUITY)) {
+            currentMediaMetadata.value = player.currentMetadata
+        }
+    }
+
+    override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+        updateNotification()
+        if (shuffleModeEnabled) {
+            // Always put current playing item at first
+            val shuffledIndices = IntArray(player.mediaItemCount) { it }
+            shuffledIndices.shuffle()
+            shuffledIndices[shuffledIndices.indexOf(player.currentMediaItemIndex)] =
+                shuffledIndices[0]
+            shuffledIndices[0] = player.currentMediaItemIndex
+            player.setShuffleOrder(DefaultShuffleOrder(shuffledIndices, System.currentTimeMillis()))
+        }
+    }
+
+    override fun onRepeatModeChanged(repeatMode: Int) {
+        updateNotification()
+        scope.launch {
+            dataStore.edit { settings ->
+                settings[RepeatModeKey] = repeatMode
+            }
+        }
+    }
+
+    override fun onPlayerError(error: PlaybackException) {
+        if (dataStore.get(AutoSkipNextOnErrorKey, false) &&
+            isInternetAvailable(this) &&
+            player.hasNextMediaItem()
+        ) {
+            player.seekToNext()
+            player.prepare()
+            player.playWhenReady = true
+        }
+    }
+
+    private fun createCacheDataSource(): CacheDataSource.Factory =
+        CacheDataSource
+            .Factory()
+            .setCache(downloadCache)
+            .setUpstreamDataSourceFactory(
+                CacheDataSource
+                    .Factory()
+                    .setCache(playerCache)
+                    .setUpstreamDataSourceFactory(
+                        DefaultDataSource.Factory(
+                            this,
+                            OkHttpDataSource.Factory(
+                                OkHttpClient
+                                    .Builder()
+                                    .proxy(YouTube.proxy)
+                                    .build(),
+                            ),
+                        ),
+                    ),
+            ).setCacheWriteDataSinkFactory(null)
+            .setFlags(FLAG_IGNORE_CACHE_ON_ERROR)
+
+    private fun createDataSourceFactory(): DataSource.Factory {
+        val songUrlCache = HashMap<String, Pair<String, Long>>()
+        return ResolvingDataSource.Factory(createCacheDataSource()) { dataSpec ->
+            val mediaId = dataSpec.key ?: error("No media id")
+
+            if (downloadCache.isCached(
+                    mediaId,
+                    dataSpec.position,
+                    if (dataSpec.length >= 0) dataSpec.length else 1
+                ) ||
+                playerCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH)
+            ) {
+                scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
+                return@Factory dataSpec
+            }
+
+            songUrlCache[mediaId]?.takeIf { it.second > System.currentTimeMillis() }?.let {
+                scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
+                return@Factory dataSpec.withUri(it.first.toUri())
+            }
+
+            val playbackData = runBlocking(Dispatchers.IO) {
+                YTPlayerUtils.playerResponseForPlayback(
+                    mediaId,
+                    audioQuality = audioQuality,
+                    connectivityManager = connectivityManager,
+                )
+            }.getOrNull()
+
+            if (playbackData == null) {
+                throw PlaybackException(
+                    getString(R.string.error_unknown),
+                    null,
+                    PlaybackException.ERROR_CODE_REMOTE_ERROR
+                )
+            } else {
+                val format = playbackData.format
+
+                database.query {
+                    upsert(
+                        FormatEntity(
+                            id = mediaId,
+                            itag = format.itag,
+                            mimeType = format.mimeType.split(";")[0],
+                            codecs = format.mimeType.split("codecs=")[1].removeSurrounding("\""),
+                            bitrate = format.bitrate,
+                            sampleRate = format.audioSampleRate,
+                            contentLength = format.contentLength!!,
+                            loudnessDb = playbackData.audioConfig?.loudnessDb,
+                            playbackUrl = playbackData.playbackTracking?.videostatsPlaybackUrl?.baseUrl
+                        )
+                    )
+                }
+                scope.launch(Dispatchers.IO) { recoverSong(mediaId, playbackData) }
+
+                val streamUrl = playbackData.streamUrl
+
+                songUrlCache[mediaId] =
+                    streamUrl to System.currentTimeMillis() + (playbackData.streamExpiresInSeconds * 1000L)
+                return@Factory dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
+            }
+        }
+    }
+
+    private fun createMediaSourceFactory() =
+        DefaultMediaSourceFactory(
+            createDataSourceFactory(),
+            ExtractorsFactory {
+                arrayOf(MatroskaExtractor(), FragmentedMp4Extractor())
+            },
+        )
+
+    private fun createRenderersFactory() =
+        object : DefaultRenderersFactory(this) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean,
+            ) = DefaultAudioSink
+                .Builder(this@MusicService)
+                .setEnableFloatOutput(enableFloatOutput)
+                .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                .setAudioProcessorChain(
+                    DefaultAudioSink.DefaultAudioProcessorChain(
+                        emptyArray(),
+                        SilenceSkippingAudioProcessor(2_000_000, 20_000, 256),
+                        SonicAudioProcessor(),
+                    ),
+                ).build()
+        }
+
+    override fun onPlaybackStatsReady(
+        eventTime: AnalyticsListener.EventTime,
+        playbackStats: PlaybackStats,
+    ) {
+        val mediaItem = eventTime.timeline.getWindow(eventTime.windowIndex, Timeline.Window()).mediaItem
+
+        if (playbackStats.totalPlayTimeMs >= (
+                dataStore[HistoryDuration]?.times(1000f)
+                    ?: 30000f
+            ) &&
+            !dataStore.get(PauseListenHistoryKey, false)
+        ) {
+            database.query {
+                incrementTotalPlayTime(mediaItem.mediaId, playbackStats.totalPlayTimeMs)
+                try {
+                    insert(
+                        Event(
+                            songId = mediaItem.mediaId,
+                            timestamp = LocalDateTime.now(),
+                            playTime = playbackStats.totalPlayTimeMs,
+                        ),
+                    )
+                } catch (_: SQLException) {
+                }
+            }
+
+            CoroutineScope(Dispatchers.IO).launch {
+                val playbackUrl = database.format(mediaItem.mediaId).first()?.playbackUrl
+                    ?: YTPlayerUtils.playerResponseForMetadata(mediaItem.mediaId, null)
+                        .getOrNull()?.playbackTracking?.videostatsPlaybackUrl?.baseUrl
+                playbackUrl?.let {
+                    YouTube.registerPlayback(null, playbackUrl)
+                        .onFailure {
+                            reportException(it)
+                        }
+                }
+            }
+        }
+    }
+
+    private fun saveQueueToDisk() {
+        if (player.playbackState == STATE_IDLE) {
+            filesDir.resolve(PERSISTENT_AUTOMIX_FILE).delete()
+            filesDir.resolve(PERSISTENT_QUEUE_FILE).delete()
+            return
+        }
+        val persistQueue =
+            PersistQueue(
+                title = queueTitle,
+                items = player.mediaItems.mapNotNull { it.metadata },
+                mediaItemIndex = player.currentMediaItemIndex,
+                position = player.currentPosition,
+            )
+        val persistAutomix =
+            PersistQueue(
+                title = "automix",
+                items = automixItems.value.mapNotNull { it.metadata },
+                mediaItemIndex = 0,
+                position = 0,
+            )
+        runCatching {
+            filesDir.resolve(PERSISTENT_QUEUE_FILE).outputStream().use { fos ->
+                ObjectOutputStream(fos).use { oos ->
+                    oos.writeObject(persistQueue)
+                }
+            }
+        }.onFailure {
+            reportException(it)
+        }
+        runCatching {
+            filesDir.resolve(PERSISTENT_AUTOMIX_FILE).outputStream().use { fos ->
+                ObjectOutputStream(fos).use { oos ->
+                    oos.writeObject(persistAutomix)
+                }
+            }
+        }.onFailure {
+            reportException(it)
+        }
+    }
+
+    override fun onDestroy() {
+        if (dataStore.get(PersistentQueueKey, true)) {
+            saveQueueToDisk()
+        }
+        if (discordRpc?.isRpcRunning() == true) {
+            discordRpc?.closeRPC()
+        }
+        discordRpc = null
+        
+        // Clean up crossfade resources
+        crossfadeCheckJob?.cancel()
+        crossfadeManager.release()
+        
+        mediaSession.release()
+        player.removeListener(this)
+        player.removeListener(sleepTimer)
+        player.release()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?) = super.onBind(intent) ?: binder
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        stopSelf()
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = mediaSession
+
+    inner class MusicBinder : Binder() {
+        val service: MusicService
+            get() = this@MusicService
+    }
+
+    companion object {
+        const val ROOT = "root"
+        const val SONG = "song"
+        const val ARTIST = "artist"
+        const val ALBUM = "album"
+        const val PLAYLIST = "playlist"
+
+        const val CHANNEL_ID = "music_channel_01"
+        const val NOTIFICATION_ID = 888
+        const val ERROR_CODE_NO_STREAM = 1000001
+        const val CHUNK_LENGTH = 512 * 1024L
+        const val PERSISTENT_QUEUE_FILE = "persistent_queue.data"
+        const val PERSISTENT_AUTOMIX_FILE = "persistent_automix.data"
+    }
 }

@@ -148,10 +148,11 @@ import kotlin.time.Duration.Companion.seconds
 // CrossfadeManager Class
 class CrossfadeManager(
     private val scope: CoroutineScope,
-    private val primaryPlayer: ExoPlayer,
+    private var primaryPlayer: ExoPlayer, // var لكي نغير الريفرنس بعد التبديل
     private val context: Context,
     private val createMediaSourceFactory: () -> DefaultMediaSourceFactory,
-    private val createRenderersFactory: () -> DefaultRenderersFactory
+    private val createRenderersFactory: () -> DefaultRenderersFactory,
+    private val onCrossfadeComplete: (ExoPlayer) -> Unit // callback لتبديل player في MusicService
 ) {
     private var secondaryPlayer: ExoPlayer? = null
     private var crossfadeJob: Job? = null
@@ -166,6 +167,10 @@ class CrossfadeManager(
     fun updateSettings(enabled: Boolean, duration: Int) {
         _crossfadeEnabled.value = enabled
         _crossfadeDuration.value = duration
+    }
+
+    fun updatePrimaryPlayer(newPlayer: ExoPlayer) {
+        primaryPlayer = newPlayer
     }
 
     fun startCrossfade(nextMediaItem: MediaItem, nextMediaDuration: Long) {
@@ -210,8 +215,34 @@ class CrossfadeManager(
     private fun completeCrossfade() {
         primaryPlayer.pause()
         primaryPlayer.volume = 1f
-        // لا تحرر secondaryPlayer هنا!
+
+        secondaryPlayer?.let { secondary ->
+            // الآن secondaryPlayer هو المشغل الرئيسي
+            onCrossfadeComplete(secondary)
+            secondaryPlayer = null
+        }
+
         isCrossfading = false
+    }
+
+    fun switchToPlayer(newPlayer: ExoPlayer) {
+    // أزل الـ listeners من الـ player القديم
+    player.removeListener(this)
+    player.removeListener(sleepTimer)
+    player.release()
+
+    // عدّل المتغير player
+    player = newPlayer
+
+    // أضف الـ listeners للـ player الجديد
+    player.addListener(this)
+    player.addListener(sleepTimer)
+
+    // أعد تعيين mediaSession ليعمل مع الـ player الجديد
+    mediaSession.setPlayer(player)
+
+    // حدث CrossfadeManager ليستخدم الـ player الجديد
+    crossfadeManager.updatePrimaryPlayer(player)
     }
 
     fun release() {

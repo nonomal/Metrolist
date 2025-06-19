@@ -62,6 +62,8 @@ import com.metrolist.music.constants.AudioQualityKey
 import com.metrolist.music.constants.AutoLoadMoreKey
 import com.metrolist.music.constants.AutoDownloadOnLikeKey
 import com.metrolist.music.constants.AutoSkipNextOnErrorKey
+import com.metrolist.music.constants.CrossfadeEnabledKey
+import com.metrolist.music.constants.CrossfadeDurationKey
 import com.metrolist.music.constants.DiscordTokenKey
 import com.metrolist.music.constants.EnableDiscordRPCKey
 import com.metrolist.music.constants.HideExplicitKey
@@ -117,6 +119,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -141,6 +144,113 @@ import javax.inject.Inject
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.time.Duration.Companion.seconds
+
+// CrossfadeManager Class
+class CrossfadeManager(
+    private val scope: CoroutineScope,
+    private val primaryPlayer: ExoPlayer,
+    private val context: Context,
+    private val createMediaSourceFactory: () -> DefaultMediaSourceFactory,
+    private val createRenderersFactory: () -> DefaultRenderersFactory
+) {
+    private var secondaryPlayer: ExoPlayer? = null
+    private var crossfadeJob: Job? = null
+    private var isCrossfading = false
+    
+    private val _crossfadeEnabled = MutableStateFlow(false)
+    val crossfadeEnabled = _crossfadeEnabled.asStateFlow()
+    
+    private val _crossfadeDuration = MutableStateFlow(3)
+    val crossfadeDuration = _crossfadeDuration.asStateFlow()
+    
+    fun updateSettings(enabled: Boolean, duration: Int) {
+        _crossfadeEnabled.value = enabled
+        _crossfadeDuration.value = duration
+    }
+    
+    fun startCrossfade(nextMediaItem: MediaItem) {
+        if (!crossfadeEnabled.value || isCrossfading) return
+        
+        isCrossfading = true
+        crossfadeJob?.cancel()
+        
+        secondaryPlayer = createSecondaryPlayer().apply {
+            setMediaItem(nextMediaItem)
+            prepare()
+            volume = 0f
+            playWhenReady = true
+        }
+        
+        crossfadeJob = scope.launch {
+            performCrossfade()
+        }
+    }
+    
+    private suspend fun performCrossfade() {
+        val duration = crossfadeDuration.value * 1000L
+        val steps = 50
+        val stepDuration = duration / steps
+        
+        repeat(steps) { step ->
+            val progress = step.toFloat() / steps
+            
+            primaryPlayer.volume = 1f - progress
+            secondaryPlayer?.volume = progress
+            
+            delay(stepDuration)
+        }
+        
+        completeCrossfade()
+    }
+    
+    private fun completeCrossfade() {
+        primaryPlayer.pause()
+        
+        secondaryPlayer?.let { secondary ->
+            val currentPosition = secondary.currentPosition
+            val mediaItem = secondary.currentMediaItem
+            
+            primaryPlayer.setMediaItem(mediaItem!!)
+            primaryPlayer.seekTo(currentPosition)
+            primaryPlayer.volume = 1f
+            primaryPlayer.playWhenReady = true
+            
+            secondary.release()
+            secondaryPlayer = null
+        }
+        
+        isCrossfading = false
+    }
+    
+    private fun createSecondaryPlayer(): ExoPlayer {
+        return ExoPlayer.Builder(context)
+            .setMediaSourceFactory(createMediaSourceFactory())
+            .setRenderersFactory(createRenderersFactory())
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                false
+            )
+            .build()
+    }
+    
+    fun shouldStartCrossfade(currentPosition: Long, duration: Long): Boolean {
+        if (!crossfadeEnabled.value || isCrossfading) return false
+        
+        val crossfadeDurationMs = crossfadeDuration.value * 1000L
+        val timeRemaining = duration - currentPosition
+        
+        return timeRemaining <= crossfadeDurationMs && timeRemaining > 0
+    }
+    
+    fun release() {
+        crossfadeJob?.cancel()
+        secondaryPlayer?.release()
+        secondaryPlayer = null
+    }
+}
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 @AndroidEntryPoint
@@ -207,6 +317,10 @@ class MusicService :
 
     val automixItems = MutableStateFlow<List<MediaItem>>(emptyList())
 
+    // Crossfade variables
+    private lateinit var crossfadeManager: CrossfadeManager
+    private var crossfadeCheckJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         setMediaNotificationProvider(
@@ -243,6 +357,16 @@ class MusicService :
                     addListener(sleepTimer)
                     addAnalyticsListener(PlaybackStatsListener(false, this@MusicService))
                 }
+
+        // Initialize CrossfadeManager
+        crossfadeManager = CrossfadeManager(
+            scope = scope,
+            primaryPlayer = player,
+            context = this,
+            createMediaSourceFactory = ::createMediaSourceFactory,
+            createRenderersFactory = ::createRenderersFactory
+        )
+
         mediaLibrarySessionCallback.apply {
             toggleLike = ::toggleLike
             toggleLibrary = ::toggleLibrary
@@ -333,6 +457,14 @@ class MusicService :
                 }
         }
 
+        // Monitor Crossfade settings
+        combine(
+            dataStore.data.map { it[CrossfadeEnabledKey] ?: false },
+            dataStore.data.map { it[CrossfadeDurationKey] ?: 3 }
+        ) { enabled, duration ->
+            crossfadeManager.updateSettings(enabled, duration)
+        }.collect(scope) { }
+
         dataStore.data
             .map { it[DiscordTokenKey] to (it[EnableDiscordRPCKey] ?: true) }
             .debounce(300)
@@ -380,6 +512,9 @@ class MusicService :
             }
         }
 
+        // Start crossfade monitoring
+        startCrossfadeMonitoring()
+
         // Save queue periodically to prevent queue loss from crash or force kill
         scope.launch {
             while (isActive) {
@@ -387,6 +522,23 @@ class MusicService :
                 if (dataStore.get(PersistentQueueKey, true)) {
                     saveQueueToDisk()
                 }
+            }
+        }
+    }
+
+    private fun startCrossfadeMonitoring() {
+        crossfadeCheckJob = scope.launch {
+            while (isActive) {
+                if (player.isPlaying && player.hasNextMediaItem()) {
+                    val currentPosition = player.currentPosition
+                    val duration = player.duration
+                    
+                    if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
+                        val nextMediaItem = player.getMediaItemAt(player.currentMediaItemIndex + 1)
+                        crossfadeManager.startCrossfade(nextMediaItem)
+                    }
+                }
+                delay(500) // Check every half second
             }
         }
     }
@@ -900,18 +1052,18 @@ class MusicService :
                         ),
                     )
                 } catch (_: SQLException) {
+                }
             }
-        }
 
-        CoroutineScope(Dispatchers.IO).launch {
-            val playbackUrl = database.format(mediaItem.mediaId).first()?.playbackUrl
-                ?: YTPlayerUtils.playerResponseForMetadata(mediaItem.mediaId, null)
-                    .getOrNull()?.playbackTracking?.videostatsPlaybackUrl?.baseUrl
-            playbackUrl?.let {
-                YouTube.registerPlayback(null, playbackUrl)
-                    .onFailure {
-                        reportException(it)
-                    }
+            CoroutineScope(Dispatchers.IO).launch {
+                val playbackUrl = database.format(mediaItem.mediaId).first()?.playbackUrl
+                    ?: YTPlayerUtils.playerResponseForMetadata(mediaItem.mediaId, null)
+                        .getOrNull()?.playbackTracking?.videostatsPlaybackUrl?.baseUrl
+                playbackUrl?.let {
+                    YouTube.registerPlayback(null, playbackUrl)
+                        .onFailure {
+                            reportException(it)
+                        }
                 }
             }
         }
@@ -965,6 +1117,11 @@ class MusicService :
             discordRpc?.closeRPC()
         }
         discordRpc = null
+        
+        // Clean up crossfade resources
+        crossfadeCheckJob?.cancel()
+        crossfadeManager.release()
+        
         mediaSession.release()
         player.removeListener(this)
         player.removeListener(sleepTimer)

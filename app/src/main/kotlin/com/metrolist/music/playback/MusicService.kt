@@ -33,6 +33,7 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -145,7 +146,7 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.time.Duration.Companion.seconds
 
-// CrossfadeManager Class
+// CrossfadeManager Class - Enhanced Version
 class CrossfadeManager(
     private val scope: CoroutineScope,
     private val primaryPlayer: ExoPlayer,
@@ -156,6 +157,7 @@ class CrossfadeManager(
     private var secondaryPlayer: ExoPlayer? = null
     private var crossfadeJob: Job? = null
     private var isCrossfading = false
+    private var isSecondaryPlayerReady = false
     
     private val _crossfadeEnabled = MutableStateFlow(false)
     val crossfadeEnabled = _crossfadeEnabled.asStateFlow()
@@ -174,33 +176,77 @@ class CrossfadeManager(
         isCrossfading = true
         crossfadeJob?.cancel()
         
+        // إنشاء المشغل الثانوي مع listener للتأكد من الجاهزية
         secondaryPlayer = createSecondaryPlayer().apply {
+            addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) {
+                        isSecondaryPlayerReady = true
+                    }
+                }
+            })
+            
             setMediaItem(nextMediaItem)
             prepare()
             volume = 0f
-            playWhenReady = true
+            
+            // تأخير بسيط للسماح للـ buffering
+            scope.launch {
+                delay(200) // تأخير 200ms للتأكد من التحضير
+                playWhenReady = true
+            }
         }
         
         crossfadeJob = scope.launch {
+            // انتظار حتى يصبح المشغل الثانوي جاهزاً
+            waitForSecondaryPlayerReady()
             performCrossfade()
         }
     }
     
+    private suspend fun waitForSecondaryPlayerReady() {
+        var attempts = 0
+        val maxAttempts = 20 // 2 ثانية كحد أقصى
+        
+        while (!isSecondaryPlayerReady && attempts < maxAttempts) {
+            delay(100)
+            attempts++
+        }
+        
+        // تأخير إضافي للتأكد من الـ buffering
+        delay(300)
+    }
+    
     private suspend fun performCrossfade() {
         val duration = crossfadeDuration.value * 1000L
-        val steps = 50
+        val steps = 100 // زيادة عدد الخطوات لانتقال أكثر سلاسة
         val stepDuration = duration / steps
+        
+        // التأكد من أن المشغل الثانوي جاهز قبل البدء
+        if (secondaryPlayer?.playbackState != Player.STATE_READY) {
+            // إذا لم يكن جاهزاً، نقوم بالانتقال العادي
+            completeCrossfadeDirectly()
+            return
+        }
         
         repeat(steps) { step ->
             val progress = step.toFloat() / steps
             
-            primaryPlayer.volume = 1f - progress
-            secondaryPlayer?.volume = progress
+            // استخدام منحنى أكثر سلاسة للانتقال
+            val smoothProgress = smoothStep(progress)
+            
+            primaryPlayer.volume = 1f - smoothProgress
+            secondaryPlayer?.volume = smoothProgress
             
             delay(stepDuration)
         }
         
         completeCrossfade()
+    }
+    
+    // دالة لإنشاء انتقال أكثر سلاسة
+    private fun smoothStep(x: Float): Float {
+        return x * x * (3.0f - 2.0f * x)
     }
     
     private fun completeCrossfade() {
@@ -210,22 +256,46 @@ class CrossfadeManager(
             val currentPosition = secondary.currentPosition
             val mediaItem = secondary.currentMediaItem
             
-            primaryPlayer.setMediaItem(mediaItem!!)
-            primaryPlayer.seekTo(currentPosition)
-            primaryPlayer.volume = 1f
-            primaryPlayer.playWhenReady = true
+            // التأكد من أن الأغنية لا تزال تعمل
+            if (secondary.isPlaying) {
+                primaryPlayer.setMediaItem(mediaItem!!)
+                primaryPlayer.seekTo(currentPosition)
+                primaryPlayer.volume = 1f
+                primaryPlayer.prepare()
+                primaryPlayer.playWhenReady = true
+            }
             
             secondary.release()
             secondaryPlayer = null
         }
         
         isCrossfading = false
+        isSecondaryPlayerReady = false
+    }
+    
+    private fun completeCrossfadeDirectly() {
+        // انتقال مباشر بدون crossfade إذا فشل التحضير
+        primaryPlayer.seekToNext()
+        isCrossfading = false
+        isSecondaryPlayerReady = false
+        secondaryPlayer?.release()
+        secondaryPlayer = null
     }
     
     private fun createSecondaryPlayer(): ExoPlayer {
         return ExoPlayer.Builder(context)
             .setMediaSourceFactory(createMediaSourceFactory())
             .setRenderersFactory(createRenderersFactory())
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        1000,  // min buffer
+                        3000,  // max buffer
+                        500,   // buffer for playback
+                        1000   // buffer for playback after rebuffer
+                    )
+                    .build()
+            )
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -242,13 +312,15 @@ class CrossfadeManager(
         val crossfadeDurationMs = crossfadeDuration.value * 1000L
         val timeRemaining = duration - currentPosition
         
-        return timeRemaining <= crossfadeDurationMs && timeRemaining > 0
+        // بدء Crossfade مبكراً أكثر للسماح بوقت التحضير
+        return timeRemaining <= (crossfadeDurationMs + 1000) && timeRemaining > crossfadeDurationMs
     }
     
     fun release() {
         crossfadeJob?.cancel()
         secondaryPlayer?.release()
         secondaryPlayer = null
+        isSecondaryPlayerReady = false
     }
 }
 
@@ -535,10 +607,21 @@ class MusicService :
                     
                     if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
                         val nextMediaItem = player.getMediaItemAt(player.currentMediaItemIndex + 1)
+                        
+                        // التأكد من أن الأغنية التالية محملة في الكاش
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                // محاولة تحميل مسبق للأغنية التالية
+                                recoverSong(nextMediaItem.mediaId)
+                            } catch (e: Exception) {
+                                // تجاهل الأخطاء في التحميل المسبق
+                            }
+                        }
+                        
                         crossfadeManager.startCrossfade(nextMediaItem)
                     }
                 }
-                delay(500) // Check every half second
+                delay(250) // فحص أكثر تكراراً
             }
         }
     }

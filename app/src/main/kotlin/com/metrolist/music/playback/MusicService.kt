@@ -532,17 +532,24 @@ class MusicService :
                 if (player.isPlaying && player.hasNextMediaItem()) {
                     val currentPosition = player.currentPosition
                     val duration = player.duration
-                    
+
                     if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
                         val nextIndex = player.currentMediaItemIndex + 1
                         val nextMediaItem = player.getMediaItemAt(nextIndex)
-                        val nextMediaDuration = nextMediaItem.mediaMetadata.duration
-                            ?:  player.getDuration()
+
+                        val timeline = player.currentTimeline
+                        val nextMediaDuration = if (!timeline.isEmpty && nextIndex < timeline.windowCount) {
+                            val window = Timeline.Window()
+                            timeline.getWindow(nextIndex, window)
+                            window.durationMs
+                        } else {
+                            180_000L
+                        }
 
                         crossfadeManager.startCrossfade(nextMediaItem, nextMediaDuration)
                     }
                 }
-                delay(500) // Check every half second
+                delay(500)
             }
         }
     }

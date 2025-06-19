@@ -147,12 +147,11 @@ import kotlin.time.Duration.Companion.seconds
 
 // CrossfadeManager Class
 class CrossfadeManager(
+    private val service: MusicService,
     private val scope: CoroutineScope,
-    private var primaryPlayer: ExoPlayer, // var لكي نغير الريفرنس بعد التبديل
     private val context: Context,
     private val createMediaSourceFactory: () -> DefaultMediaSourceFactory,
-    private val createRenderersFactory: () -> DefaultRenderersFactory,
-    private val onCrossfadeComplete: (ExoPlayer) -> Unit // callback لتبديل player في MusicService
+    private val createRenderersFactory: () -> DefaultRenderersFactory
 ) {
     private var secondaryPlayer: ExoPlayer? = null
     private var crossfadeJob: Job? = null
@@ -169,23 +168,15 @@ class CrossfadeManager(
         _crossfadeDuration.value = duration
     }
 
-    fun updatePrimaryPlayer(newPlayer: ExoPlayer) {
-        primaryPlayer = newPlayer
-    }
-
-    fun startCrossfade(nextMediaItem: MediaItem, nextMediaDuration: Long) {
-        release() // أوقف أي crossfade قديم
+    fun startCrossfade(nextMediaItem: MediaItem) {
         if (!crossfadeEnabled.value || isCrossfading) return
 
         isCrossfading = true
         crossfadeJob?.cancel()
 
-        val startPosition = maxOf(0L, nextMediaDuration - crossfadeDuration.value * 1000L)
-
         secondaryPlayer = createSecondaryPlayer().apply {
             setMediaItem(nextMediaItem)
             prepare()
-            seekTo(startPosition)
             volume = 0f
             playWhenReady = true
         }
@@ -203,7 +194,7 @@ class CrossfadeManager(
         repeat(steps) { step ->
             val progress = step.toFloat() / steps
 
-            primaryPlayer.volume = 1f - progress
+            service.player.volume = 1f - progress
             secondaryPlayer?.volume = progress
 
             delay(stepDuration)
@@ -213,26 +204,26 @@ class CrossfadeManager(
     }
 
     private fun completeCrossfade() {
-        primaryPlayer.pause()
-        primaryPlayer.volume = 1f
+        // 1. أوقف وأغلق الـprimary player
+        service.player.pause()
+        service.player.removeListener(service)
+        service.player.removeListener(service.sleepTimer)
+        service.player.release()
 
+        // 2. secondary player يصبح هو الأساسي
         secondaryPlayer?.let { secondary ->
-            // الآن secondaryPlayer هو المشغل الرئيسي
-            onCrossfadeComplete(secondary)
+            service.player = secondary
+            // إعادة ربط الـlisteners وMediaSession
+            service.player.addListener(service)
+            service.player.addListener(service.sleepTimer)
+            service.mediaSession.setPlayer(service.player)
+            service.crossfadeManager.updatePrimaryPlayer(service.player)
+            // أكمل التشغيل من نفس النقطة
+            service.player.volume = 1f
+            service.player.playWhenReady = true
             secondaryPlayer = null
         }
 
-        isCrossfading = false
-    }
-
-    fun release() {
-        crossfadeJob?.cancel()
-        crossfadeJob = null
-        secondaryPlayer?.let {
-            it.stop()
-            it.release()
-            secondaryPlayer = null
-        }
         isCrossfading = false
     }
 
@@ -257,6 +248,17 @@ class CrossfadeManager(
         val timeRemaining = duration - currentPosition
 
         return timeRemaining <= crossfadeDurationMs && timeRemaining > 0
+    }
+
+    fun release() {
+        crossfadeJob?.cancel()
+        secondaryPlayer?.release()
+        secondaryPlayer = null
+    }
+
+    // Helper for reference update in the service after player switch
+    fun updatePrimaryPlayer(newPlayer: ExoPlayer) {
+        // إذا عندك أكواد تريد تنفيذها كلما تغير player في service
     }
 }
 
@@ -367,13 +369,13 @@ class MusicService :
                 }
 
         // Initialize CrossfadeManager
-        crossfadeManager = CrossfadeManager(
-            scope = scope,
-            primaryPlayer = player,
-            context = this,
-            createMediaSourceFactory = ::createMediaSourceFactory,
-            createRenderersFactory = ::createRenderersFactory
-        )
+crossfadeManager = CrossfadeManager(
+    service = this, // مرر الخدمة نفسها
+    scope = scope,
+    context = this,
+    createMediaSourceFactory = ::createMediaSourceFactory,
+    createRenderersFactory = ::createRenderersFactory
+)
 
         mediaLibrarySessionCallback.apply {
             toggleLike = ::toggleLike
@@ -535,33 +537,21 @@ class MusicService :
     }
 
     private fun startCrossfadeMonitoring() {
-    crossfadeCheckJob = scope.launch {
-        while (isActive) {
-            if (player.isPlaying && player.hasNextMediaItem()) {
-                val currentPosition = player.currentPosition
-                val duration = player.duration
-
-                if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
-                    val nextIndex = player.currentMediaItemIndex + 1
-                    val nextMediaItem = player.getMediaItemAt(nextIndex)
-
-                    // الحصول على مدة الأغنية التالية عبر timeline
-                    val timeline = player.currentTimeline
-                    val nextMediaDuration = if (!timeline.isEmpty && nextIndex < timeline.windowCount) {
-                        val window = Timeline.Window()
-                        timeline.getWindow(nextIndex, window)
-                        window.durationMs
-                    } else {
-                        180_000L // مدة افتراضية (3 دقائق)
+        crossfadeCheckJob = scope.launch {
+            while (isActive) {
+                if (player.isPlaying && player.hasNextMediaItem()) {
+                    val currentPosition = player.currentPosition
+                    val duration = player.duration
+                    
+                    if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
+                        val nextMediaItem = player.getMediaItemAt(player.currentMediaItemIndex + 1)
+                        crossfadeManager.startCrossfade(nextMediaItem)
                     }
-
-                    crossfadeManager.startCrossfade(nextMediaItem, nextMediaDuration)
                 }
+                delay(500) // Check every half second
             }
-            delay(500) // افحص كل نصف ثانية
         }
     }
-}
 
     private fun updateNotification() {
         mediaSession.setCustomLayout(
@@ -654,8 +644,6 @@ class MusicService :
         queue: Queue,
         playWhenReady: Boolean = true,
     ) {
-        crossfadeManager.release()
-
         if (!scope.isActive) scope = CoroutineScope(Dispatchers.Main) + Job()
         currentQueue = queue
         queueTitle = null
@@ -705,9 +693,6 @@ class MusicService :
     }
 
     fun startRadioSeamlessly() {
-
-        crossfadeManager.release()
-
         val currentMediaMetadata = player.currentMetadata ?: return
         if (player.currentMediaItemIndex > 0) player.removeMediaItems(
             0,
@@ -787,9 +772,6 @@ class MusicService :
     }
 
     fun playNext(items: List<MediaItem>) {
-
-        crossfadeManager.release()
-
         player.addMediaItems(
             if (player.mediaItemCount == 0) 0 else player.currentMediaItemIndex + 1,
             items
@@ -1137,30 +1119,7 @@ class MusicService :
         }
     }
 
-    fun switchToPlayer(newPlayer: ExoPlayer) {
-    // أزل الـ listeners من الـ player القديم
-    player.removeListener(this)
-    player.removeListener(sleepTimer)
-    player.release()
-
-    // عدّل المتغير player
-    player = newPlayer
-
-    // أضف الـ listeners للـ player الجديد
-    player.addListener(this)
-    player.addListener(sleepTimer)
-
-    // أعد تعيين mediaSession ليعمل مع الـ player الجديد
-    mediaSession.setPlayer(player)
-
-    // حدث CrossfadeManager ليستخدم الـ player الجديد
-    crossfadeManager.updatePrimaryPlayer(player)
-    }
-
     override fun onDestroy() {
-
-        crossfadeManager.release()
-
         if (dataStore.get(PersistentQueueKey, true)) {
             saveQueueToDisk()
         }
@@ -1172,7 +1131,7 @@ class MusicService :
         // Clean up crossfade resources
         crossfadeCheckJob?.cancel()
         crossfadeManager.release()
-        
+
         mediaSession.release()
         player.removeListener(this)
         player.removeListener(sleepTimer)

@@ -169,9 +169,7 @@ class CrossfadeManager(
     }
 
     fun startCrossfade(nextMediaItem: MediaItem, nextMediaDuration: Long) {
-        // تأكد من عدم وجود secondaryPlayer يعمل مسبقًا!
-        release()
-
+        release() // أوقف أي crossfade قديم
         if (!crossfadeEnabled.value || isCrossfading) return
 
         isCrossfading = true
@@ -212,13 +210,7 @@ class CrossfadeManager(
     private fun completeCrossfade() {
         primaryPlayer.pause()
         primaryPlayer.volume = 1f
-
-        // الأهم: تأكد من تحرير secondaryPlayer كي لا يتداخل الصوت
-        secondaryPlayer?.let {
-            it.release()
-            secondaryPlayer = null
-        }
-
+        // لا تحرر secondaryPlayer هنا!
         isCrossfading = false
     }
 

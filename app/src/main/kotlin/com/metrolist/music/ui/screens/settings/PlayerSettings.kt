@@ -194,7 +194,7 @@ fun PlayerSettings(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            painterResource(R.drawable.access_time),
+                            painterResource(R.drawable.bedtime),
                             contentDescription = null,
                             modifier = Modifier.padding(end = 16.dp)
                         )

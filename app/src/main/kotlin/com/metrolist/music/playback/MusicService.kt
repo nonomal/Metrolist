@@ -146,7 +146,7 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.time.Duration.Companion.seconds
 
-// CrossfadeManager Class - Fixed Version to Prevent Session Conflicts
+// CrossfadeManager Class - Fixed Version to Prevent Double Track Transition
 class CrossfadeManager(
     private val scope: CoroutineScope,
     private val primaryPlayer: ExoPlayer,
@@ -159,7 +159,7 @@ class CrossfadeManager(
     private var isCrossfading = false
     private var isSecondaryPlayerReady = false
     private var preloadJob: Job? = null
-    private var lastTransferredPosition = 0L
+    private var targetMediaItem: MediaItem? = null
     
     private val _crossfadeEnabled = MutableStateFlow(false)
     val crossfadeEnabled = _crossfadeEnabled.asStateFlow()
@@ -174,6 +174,8 @@ class CrossfadeManager(
     
     fun preloadNextTrack(nextMediaItem: MediaItem) {
         if (!crossfadeEnabled.value || secondaryPlayer != null) return
+        
+        targetMediaItem = nextMediaItem
         
         preloadJob?.cancel()
         preloadJob = scope.launch {
@@ -190,7 +192,6 @@ class CrossfadeManager(
                     }
                     
                     override fun onPlayerError(error: PlaybackException) {
-                        // إعادة المحاولة في حالة الخطأ
                         scope.launch {
                             delay(500)
                             if (secondaryPlayer != null) {
@@ -208,7 +209,6 @@ class CrossfadeManager(
                 setMediaItem(nextMediaItem)
                 volume = 0f
                 prepare()
-                // لا نبدأ التشغيل هنا
             }
         }
     }
@@ -220,13 +220,11 @@ class CrossfadeManager(
         crossfadeJob?.cancel()
         
         crossfadeJob = scope.launch {
-            performCrossfadeWithoutTransfer()
+            performCrossfadeWithCorrectTransition()
         }
     }
     
-    // طريقة جديدة: crossfade بدون نقل الجلسة
-    private suspend fun performCrossfadeWithoutTransfer() {
-        // انتظار جاهزية المشغل الثانوي
+    private suspend fun performCrossfadeWithCorrectTransition() {
         var waitTime = 0
         while (!isSecondaryPlayerReady && waitTime < 3000) {
             delay(100)
@@ -238,7 +236,6 @@ class CrossfadeManager(
             return
         }
         
-        // بدء تشغيل المشغل الثانوي
         secondaryPlayer?.playWhenReady = true
         delay(100)
         
@@ -247,7 +244,7 @@ class CrossfadeManager(
         val stepDuration = duration / steps
         
         repeat(steps) { step ->
-            if (!isCrossfading) return@performCrossfadeWithoutTransfer
+            if (!isCrossfading) return@performCrossfadeWithCorrectTransition
             
             val progress = step.toFloat() / steps
             val smoothProgress = easeInOutQuad(progress)
@@ -264,41 +261,39 @@ class CrossfadeManager(
             delay(stepDuration)
         }
         
-        // بدلاً من نقل الجلسة، نقوم بالانتقال المباشر
-        completeCrossfadeWithDirectTransition()
+        completeCrossfadeWithoutSeekNext()
     }
     
-    private suspend fun completeCrossfadeWithDirectTransition() {
+    private suspend fun completeCrossfadeWithoutSeekNext() {
         withContext(Dispatchers.Main) {
             try {
-                // إيقاف المشغل الأساسي
                 primaryPlayer.pause()
                 
-                // الحصول على الموضع الحالي من المشغل الثانوي
                 val currentPosition = secondaryPlayer?.currentPosition ?: 0L
-                lastTransferredPosition = currentPosition
                 
-                // إيقاف المشغل الثانوي
                 secondaryPlayer?.pause()
                 
-                // الانتقال للأغنية التالية في المشغل الأساسي
-                primaryPlayer.seekToNext()
-                
-                // تعيين الموضع الصحيح
-                if (currentPosition > 0) {
-                    primaryPlayer.seekTo(currentPosition)
+                if (targetMediaItem != null) {
+                    primaryPlayer.setMediaItem(targetMediaItem!!)
+                    primaryPlayer.prepare()
+                    
+                    if (currentPosition > 0) {
+                        primaryPlayer.seekTo(currentPosition)
+                    }
+                    
+                    primaryPlayer.volume = 1f
+                    primaryPlayer.playWhenReady = true
+                } else {
+                    primaryPlayer.seekToNext()
+                    primaryPlayer.volume = 1f
+                    primaryPlayer.playWhenReady = true
                 }
                 
-                // استعادة الصوت وبدء التشغيل
-                primaryPlayer.volume = 1f
-                primaryPlayer.playWhenReady = true
-                
-                // تنظيف المشغل الثانوي
                 secondaryPlayer?.release()
                 secondaryPlayer = null
+                targetMediaItem = null
                 
             } catch (e: Exception) {
-                // في حالة الخطأ، انتقال عادي
                 completeCrossfadeDirectly()
             }
         }
@@ -322,6 +317,7 @@ class CrossfadeManager(
                 primaryPlayer.volume = 1f
                 secondaryPlayer?.release()
                 secondaryPlayer = null
+                targetMediaItem = null
             } catch (e: Exception) {
                 // تجاهل الأخطاء
             }
@@ -338,10 +334,10 @@ class CrossfadeManager(
             .setLoadControl(
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
-                        500,   // min buffer
-                        2000,  // max buffer
-                        250,   // buffer for playback
-                        500    // buffer for playback after rebuffer
+                        500,
+                        2000,
+                        250,
+                        500
                     )
                     .setPrioritizeTimeOverSizeThresholds(true)
                     .build()
@@ -351,7 +347,7 @@ class CrossfadeManager(
                     .setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                     .build(),
-                false // مهم: لا نريد التحكم في التركيز الصوتي
+                false
             )
             .build()
     }
@@ -379,6 +375,7 @@ class CrossfadeManager(
         preloadJob?.cancel()
         secondaryPlayer?.release()
         secondaryPlayer = null
+        targetMediaItem = null
         isSecondaryPlayerReady = false
         isCrossfading = false
     }
@@ -668,18 +665,16 @@ class MusicService :
                     if (duration > 0) {
                         val nextMediaItem = player.getMediaItemAt(player.currentMediaItemIndex + 1)
                         
-                        // تحضير مسبق للأغنية التالية
                         if (crossfadeManager.shouldPreloadNext(currentPosition, duration)) {
                             crossfadeManager.preloadNextTrack(nextMediaItem)
                         }
                         
-                        // بدء crossfade
                         if (crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
                             crossfadeManager.startCrossfade()
                         }
                     }
                 }
-                delay(200) // فحص كل 200ms
+                delay(200)
             }
         }
     }
@@ -930,9 +925,7 @@ class MusicService :
                  update(song)
                  syncUtils.likeSong(song)
 
-                 // Check if auto-download on like is enabled and the song is now liked
                  if (dataStore.get(AutoDownloadOnLikeKey, false) && song.liked) {
-                     // Trigger download for the liked song
                      val downloadRequest = androidx.media3.exoplayer.offline.DownloadRequest
                          .Builder(song.id, song.id.toUri())
                          .setCustomCacheKey(song.id)
@@ -972,16 +965,11 @@ class MusicService :
         )
     }
 
-    // تحديث onMediaItemTransition لتجنب التداخل مع crossfade
     override fun onMediaItemTransition(
         mediaItem: MediaItem?,
         reason: Int,
     ) {
-        // تجنب التداخل مع crossfade
-        if (!crossfadeManager.crossfadeEnabled.value || 
-            reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
-            
-            // Auto load more songs
+        if (crossfadeManager.crossfadeEnabled.value) {
             if (dataStore.get(AutoLoadMoreKey, true) &&
                 reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
                 player.mediaItemCount - player.currentMediaItemIndex <= 5 &&
@@ -993,6 +981,21 @@ class MusicService :
                     if (player.playbackState != STATE_IDLE) {
                         player.addMediaItems(mediaItems.drop(1))
                     }
+                }
+            }
+            return
+        }
+        
+        if (dataStore.get(AutoLoadMoreKey, true) &&
+            reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
+            player.mediaItemCount - player.currentMediaItemIndex <= 5 &&
+            currentQueue.hasNextPage()
+        ) {
+            scope.launch(SilentHandler) {
+                val mediaItems =
+                    currentQueue.nextPage().filterExplicit(dataStore.get(HideExplicitKey, false))
+                if (player.playbackState != STATE_IDLE) {
+                    player.addMediaItems(mediaItems.drop(1))
                 }
             }
         }
@@ -1033,7 +1036,6 @@ class MusicService :
     override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
         updateNotification()
         if (shuffleModeEnabled) {
-            // Always put current playing item at first
             val shuffledIndices = IntArray(player.mediaItemCount) { it }
             shuffledIndices.shuffle()
             shuffledIndices[shuffledIndices.indexOf(player.currentMediaItemIndex)] =
@@ -1265,7 +1267,6 @@ class MusicService :
         }
         discordRpc = null
         
-        // Clean up crossfade resources
         crossfadeCheckJob?.cancel()
         crossfadeManager.release()
         

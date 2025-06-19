@@ -225,26 +225,6 @@ class CrossfadeManager(
         isCrossfading = false
     }
 
-    fun switchToPlayer(newPlayer: ExoPlayer) {
-    // أزل الـ listeners من الـ player القديم
-    player.removeListener(this)
-    player.removeListener(sleepTimer)
-    player.release()
-
-    // عدّل المتغير player
-    player = newPlayer
-
-    // أضف الـ listeners للـ player الجديد
-    player.addListener(this)
-    player.addListener(sleepTimer)
-
-    // أعد تعيين mediaSession ليعمل مع الـ player الجديد
-    mediaSession.setPlayer(player)
-
-    // حدث CrossfadeManager ليستخدم الـ player الجديد
-    crossfadeManager.updatePrimaryPlayer(player)
-    }
-
     fun release() {
         crossfadeJob?.cancel()
         crossfadeJob = null
@@ -1155,6 +1135,26 @@ class MusicService :
         }.onFailure {
             reportException(it)
         }
+    }
+
+    fun switchToPlayer(newPlayer: ExoPlayer) {
+    // أزل الـ listeners من الـ player القديم
+    player.removeListener(this)
+    player.removeListener(sleepTimer)
+    player.release()
+
+    // عدّل المتغير player
+    player = newPlayer
+
+    // أضف الـ listeners للـ player الجديد
+    player.addListener(this)
+    player.addListener(sleepTimer)
+
+    // أعد تعيين mediaSession ليعمل مع الـ player الجديد
+    mediaSession.setPlayer(player)
+
+    // حدث CrossfadeManager ليستخدم الـ player الجديد
+    crossfadeManager.updatePrimaryPlayer(player)
     }
 
     override fun onDestroy() {

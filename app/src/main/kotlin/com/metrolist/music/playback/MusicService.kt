@@ -146,18 +146,15 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.time.Duration.Companion.seconds
 
-// CrossfadeManager Class - Enhanced Version
+// CrossfadeManager Class - Simplified Version
 class CrossfadeManager(
     private val scope: CoroutineScope,
     private val primaryPlayer: ExoPlayer,
-    private val context: Context,
-    private val createMediaSourceFactory: () -> DefaultMediaSourceFactory,
-    private val createRenderersFactory: () -> DefaultRenderersFactory
+    private val context: Context
 ) {
-    private var secondaryPlayer: ExoPlayer? = null
     private var crossfadeJob: Job? = null
     private var isCrossfading = false
-    private var isSecondaryPlayerReady = false
+    private var originalVolume = 1f
     
     private val _crossfadeEnabled = MutableStateFlow(false)
     val crossfadeEnabled = _crossfadeEnabled.asStateFlow()
@@ -170,140 +167,46 @@ class CrossfadeManager(
         _crossfadeDuration.value = duration
     }
     
-    fun startCrossfade(nextMediaItem: MediaItem) {
-        if (!crossfadeEnabled.value || isCrossfading) return
+    fun startCrossfade() {
+        if (!crossfadeEnabled.value || isCrossfading || !primaryPlayer.hasNextMediaItem()) return
         
         isCrossfading = true
+        originalVolume = primaryPlayer.volume
         crossfadeJob?.cancel()
         
-        // إنشاء المشغل الثانوي مع listener للتأكد من الجاهزية
-        secondaryPlayer = createSecondaryPlayer().apply {
-            addListener(object : Player.Listener {
-                override fun onPlaybackStateChanged(playbackState: Int) {
-                    if (playbackState == Player.STATE_READY) {
-                        isSecondaryPlayerReady = true
-                    }
-                }
-            })
-            
-            setMediaItem(nextMediaItem)
-            prepare()
-            volume = 0f
-            
-            // تأخير بسيط للسماح للـ buffering
-            scope.launch {
-                delay(200) // تأخير 200ms للتأكد من التحضير
-                playWhenReady = true
-            }
-        }
-        
         crossfadeJob = scope.launch {
-            // انتظار حتى يصبح المشغل الثانوي جاهزاً
-            waitForSecondaryPlayerReady()
-            performCrossfade()
+            performSimpleCrossfade()
         }
     }
     
-    private suspend fun waitForSecondaryPlayerReady() {
-        var attempts = 0
-        val maxAttempts = 20 // 2 ثانية كحد أقصى
-        
-        while (!isSecondaryPlayerReady && attempts < maxAttempts) {
-            delay(100)
-            attempts++
-        }
-        
-        // تأخير إضافي للتأكد من الـ buffering
-        delay(300)
-    }
-    
-    private suspend fun performCrossfade() {
+    private suspend fun performSimpleCrossfade() {
         val duration = crossfadeDuration.value * 1000L
-        val steps = 100 // زيادة عدد الخطوات لانتقال أكثر سلاسة
-        val stepDuration = duration / steps
+        val fadeOutSteps = 30
+        val stepDuration = (duration / 2) / fadeOutSteps
         
-        // التأكد من أن المشغل الثانوي جاهز قبل البدء
-        if (secondaryPlayer?.playbackState != Player.STATE_READY) {
-            // إذا لم يكن جاهزاً، نقوم بالانتقال العادي
-            completeCrossfadeDirectly()
-            return
-        }
-        
-        repeat(steps) { step ->
-            val progress = step.toFloat() / steps
-            
-            // استخدام منحنى أكثر سلاسة للانتقال
-            val smoothProgress = smoothStep(progress)
-            
-            primaryPlayer.volume = 1f - smoothProgress
-            secondaryPlayer?.volume = smoothProgress
-            
+        // Phase 1: Fade out current track
+        repeat(fadeOutSteps) { step ->
+            val progress = step.toFloat() / fadeOutSteps
+            val volume = originalVolume * (1f - progress)
+            primaryPlayer.volume = volume
             delay(stepDuration)
         }
         
-        completeCrossfade()
-    }
-    
-    // دالة لإنشاء انتقال أكثر سلاسة
-    private fun smoothStep(x: Float): Float {
-        return x * x * (3.0f - 2.0f * x)
-    }
-    
-    private fun completeCrossfade() {
-        primaryPlayer.pause()
+        // Phase 2: Switch to next track
+        primaryPlayer.volume = 0f
+        primaryPlayer.seekToNext()
+        delay(200) // تأخير للتحميل
         
-        secondaryPlayer?.let { secondary ->
-            val currentPosition = secondary.currentPosition
-            val mediaItem = secondary.currentMediaItem
-            
-            // التأكد من أن الأغنية لا تزال تعمل
-            if (secondary.isPlaying) {
-                primaryPlayer.setMediaItem(mediaItem!!)
-                primaryPlayer.seekTo(currentPosition)
-                primaryPlayer.volume = 1f
-                primaryPlayer.prepare()
-                primaryPlayer.playWhenReady = true
-            }
-            
-            secondary.release()
-            secondaryPlayer = null
+        // Phase 3: Fade in new track
+        repeat(fadeOutSteps) { step ->
+            val progress = step.toFloat() / fadeOutSteps
+            val volume = originalVolume * progress
+            primaryPlayer.volume = volume
+            delay(stepDuration)
         }
         
+        primaryPlayer.volume = originalVolume
         isCrossfading = false
-        isSecondaryPlayerReady = false
-    }
-    
-    private fun completeCrossfadeDirectly() {
-        // انتقال مباشر بدون crossfade إذا فشل التحضير
-        primaryPlayer.seekToNext()
-        isCrossfading = false
-        isSecondaryPlayerReady = false
-        secondaryPlayer?.release()
-        secondaryPlayer = null
-    }
-    
-    private fun createSecondaryPlayer(): ExoPlayer {
-        return ExoPlayer.Builder(context)
-            .setMediaSourceFactory(createMediaSourceFactory())
-            .setRenderersFactory(createRenderersFactory())
-            .setLoadControl(
-                DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                        1000,  // min buffer
-                        3000,  // max buffer
-                        500,   // buffer for playback
-                        1000   // buffer for playback after rebuffer
-                    )
-                    .build()
-            )
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                    .build(),
-                false
-            )
-            .build()
     }
     
     fun shouldStartCrossfade(currentPosition: Long, duration: Long): Boolean {
@@ -312,15 +215,12 @@ class CrossfadeManager(
         val crossfadeDurationMs = crossfadeDuration.value * 1000L
         val timeRemaining = duration - currentPosition
         
-        // بدء Crossfade مبكراً أكثر للسماح بوقت التحضير
-        return timeRemaining <= (crossfadeDurationMs + 1000) && timeRemaining > crossfadeDurationMs
+        return timeRemaining <= crossfadeDurationMs && timeRemaining > 100
     }
     
     fun release() {
         crossfadeJob?.cancel()
-        secondaryPlayer?.release()
-        secondaryPlayer = null
-        isSecondaryPlayerReady = false
+        isCrossfading = false
     }
 }
 
@@ -406,11 +306,23 @@ class MusicService :
                     setSmallIcon(R.drawable.small_icon)
                 },
         )
+        
+        // تحسين إعدادات ExoPlayer للحد من التقطيع
         player =
             ExoPlayer
                 .Builder(this)
                 .setMediaSourceFactory(createMediaSourceFactory())
                 .setRenderersFactory(createRenderersFactory())
+                .setLoadControl(
+                    DefaultLoadControl.Builder()
+                        .setBufferDurationsMs(
+                            2000,  // min buffer - زيادة البافر
+                            5000,  // max buffer
+                            1000,  // buffer for playback
+                            2000   // buffer for playback after rebuffer
+                        )
+                        .build()
+                )
                 .setHandleAudioBecomingNoisy(true)
                 .setWakeMode(C.WAKE_MODE_NETWORK)
                 .setAudioAttributes(
@@ -430,13 +342,11 @@ class MusicService :
                     addAnalyticsListener(PlaybackStatsListener(false, this@MusicService))
                 }
 
-        // Initialize CrossfadeManager
+        // Initialize CrossfadeManager - النسخة المبسطة
         crossfadeManager = CrossfadeManager(
             scope = scope,
             primaryPlayer = player,
-            context = this,
-            createMediaSourceFactory = ::createMediaSourceFactory,
-            createRenderersFactory = ::createRenderersFactory
+            context = this
         )
 
         mediaLibrarySessionCallback.apply {
@@ -467,7 +377,9 @@ class MusicService :
         combine(playerVolume, normalizeFactor) { playerVolume, normalizeFactor ->
             playerVolume * normalizeFactor
         }.collectLatest(scope) {
-            player.volume = it
+            if (!crossfadeManager.crossfadeEnabled.value || player.volume == it) {
+                player.volume = it
+            }
         }
 
         playerVolume.debounce(1000).collect(scope) { volume ->
@@ -606,25 +518,16 @@ class MusicService :
                     val duration = player.duration
                     
                     if (duration > 0 && crossfadeManager.shouldStartCrossfade(currentPosition, duration)) {
-                        val nextMediaItem = player.getMediaItemAt(player.currentMediaItemIndex + 1)
-                        
-                        // التأكد من أن الأغنية التالية محملة في الكاش
-                        scope.launch(Dispatchers.IO) {
-                            try {
-                                // محاولة تحميل مسبق للأغنية التالية
-                                recoverSong(nextMediaItem.mediaId)
-                            } catch (e: Exception) {
-                                // تجاهل الأخطاء في التحميل المسبق
-                            }
-                        }
-                        
-                        crossfadeManager.startCrossfade(nextMediaItem)
+                        crossfadeManager.startCrossfade()
                     }
                 }
-                delay(250) // فحص أكثر تكراراً
+                delay(500) // فحص كل نصف ثانية
             }
         }
     }
+
+    // باقي الكود يبقى كما هو...
+    // [يمكنك نسخ باقي الدوال من الكود السابق]
 
     private fun updateNotification() {
         mediaSession.setCustomLayout(

@@ -152,17 +152,13 @@ class MusicService :
     @DownloadCache
     lateinit var downloadCache: SimpleCache
 
-    // --- PLAYER & CROSSFADE ARCHITECTURE ---
     private lateinit var player1: ExoPlayer
     private lateinit var player2: ExoPlayer
     
-    // **THE FIX:** Renamed `activePlayer` to `player` and made it public (default visibility)
-    // This `player` variable will point to either player1 or player2.
     lateinit var player: ExoPlayer
     
     private var crossfadeCheckJob: Job? = null
-    private var crossfadeJob: Job? = null // Job to manage the crossfade coroutine
-    // ------------------------------------
+    private var crossfadeJob: Job? = null
 
     private lateinit var mediaSession: MediaLibrarySession
 
@@ -185,10 +181,9 @@ class MusicService :
             },
         )
 
-        // Initialize the two players
         player1 = createPlayer()
         player2 = createPlayer()
-        player = player1 // Start with player1 as active
+        player = player1
 
         mediaLibrarySessionCallback.apply {
             toggleLike = ::toggleLike
@@ -364,8 +359,6 @@ class MusicService :
             }
     }
 
-    // --- START OF INTEGRATED CROSSFADE LOGIC ---
-
     private fun startCrossfadeMonitoring() {
         crossfadeCheckJob?.cancel()
         crossfadeCheckJob = scope.launch {
@@ -433,23 +426,28 @@ class MusicService :
         }
     }
 
+    // --- START OF THE CRITICAL FIX ---
     private fun onCrossfadeComplete(oldPlayer: ExoPlayer, newPlayer: ExoPlayer) {
-        oldPlayer.playWhenReady = false
-        oldPlayer.stop()
-
+        // الخطوة 1: قم بتعيين المشغل الجديد كالمشغل النشط على الفور
         player = newPlayer
-        player.volume = playerVolume.value
+        player.volume = playerVolume.value // تأكد من أن مستوى الصوت صحيح
 
+        // الخطوة 2: أخبر MediaSession بالمشغل الجديد **قبل** إيقاف القديم
         mediaSession.player = player
 
+        // الخطوة 3: قم بتبديل أي مستمعين (listeners) يعتمدون على الحالة
         oldPlayer.removeListener(sleepTimer)
         player.addListener(sleepTimer)
 
+        // الخطوة 4: قم بتحديث بيانات الواجهة والإشعار بناءً على المشغل الجديد
         currentMediaMetadata.value = player.currentMetadata
         updateNotification()
-    }
 
-    // --- END OF INTEGRATED CROSSFADE LOGIC ---
+        // الخطوة 5: الآن، وبعد أن تم تحديث كل شيء، قم بإيقاف المشغل القديم
+        oldPlayer.playWhenReady = false
+        oldPlayer.stop()
+    }
+    // --- END OF THE CRITICAL FIX ---
 
     private fun updateNotification() {
         mediaSession.setCustomLayout(
@@ -1045,4 +1043,3 @@ class MusicService :
         const val PERSISTENT_AUTOMIX_FILE = "persistent_automix.data"
     }
 }
-

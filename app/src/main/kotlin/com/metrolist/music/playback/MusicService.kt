@@ -10,6 +10,7 @@ import android.database.SQLException
 import android.media.audiofx.AudioEffect
 import android.net.ConnectivityManager
 import android.os.Binder
+import android.os.IBinder
 import androidx.core.content.getSystemService
 import androidx.core.net.toUri
 import androidx.datastore.preferences.core.edit
@@ -137,19 +138,16 @@ class MusicService :
     @DownloadCache
     lateinit var downloadCache: SimpleCache
 
-    // --- STATEFLOW PLAYER ARCHITECTURE ---
     private lateinit var player1: ExoPlayer
     private lateinit var player2: ExoPlayer
     
-    private lateinit var _player: ExoPlayer // The private, internal reference to the active player
+    private lateinit var _player: ExoPlayer
     
-    // The public StateFlow that the UI layer will collect to get the active player instance.
     private val _playerFlow = MutableStateFlow<ExoPlayer?>(null)
     val playerFlow: StateFlow<ExoPlayer?> = _playerFlow.asStateFlow()
 
     private var crossfadeCheckJob: Job? = null
     private var crossfadeJob: Job? = null
-    // ------------------------------------
 
     private lateinit var mediaSession: MediaLibrarySession
     private var isAudioEffectSessionOpened = false
@@ -166,8 +164,8 @@ class MusicService :
 
         player1 = createPlayer()
         player2 = createPlayer()
-        _player = player1 // Start with player1 as active internally
-        _playerFlow.value = _player // Emit the initial player to the flow
+        _player = player1
+        _playerFlow.value = _player
 
         mediaLibrarySessionCallback.apply {
             toggleLike = ::toggleLike
@@ -643,17 +641,30 @@ class MusicService :
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): Binder = super.onBind(intent) ?: binder
-    override fun onTaskRemoved(rootIntent: Intent?) { super.onTaskRemoved(rootIntent); stopSelf() }
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = mediaSession
-    inner class MusicBinder : Binder() { val service: MusicService get() = this@MusicService }
+    // --- CORRECTED OVERRIDES ---
+    override fun onBind(intent: Intent?): IBinder? {
+        // Must return IBinder? to match the superclass
+        return super.onBind(intent) ?: binder
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        stopSelf()
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession {
+        // The return type must match exactly: MediaLibraryService.MediaLibrarySession
+        return mediaSession
+    }
+
+    inner class MusicBinder : Binder() {
+        val service: MusicService
+            get() = this@MusicService
+    }
+    
     companion object {
         const val ROOT = "root"; const val SONG = "song"; const val ARTIST = "artist"; const val ALBUM = "album"; const val PLAYLIST = "playlist"
-        const val CHANNEL_ID = "music_channel_01"
-        const val NOTIFICATION_ID = 888
-        const val ERROR_CODE_NO_STREAM = 1000001
-        const val CHUNK_LENGTH = 512 * 1024L
-        const val PERSISTENT_QUEUE_FILE = "persistent_queue.data"
-        const val PERSISTENT_AUTOMIX_FILE = "persistent_automix.data"
+        const val CHANNEL_ID = "music_channel_01"; const val NOTIFICATION_ID = 888; const val ERROR_CODE_NO_STREAM = 1000001
+        const val CHUNK_LENGTH = 512 * 1024L; const val PERSISTENT_QUEUE_FILE = "persistent_queue.data"; const val PERSISTENT_AUTOMIX_FILE = "persistent_automix.data"
     }
 }

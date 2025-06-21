@@ -15,6 +15,7 @@ import androidx.core.net.toUri
 import androidx.datastore.preferences.core.edit
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -152,13 +153,16 @@ class MusicService :
     @DownloadCache
     lateinit var downloadCache: SimpleCache
 
+    // --- NEW FORWARDINGPLAYER ARCHITECTURE ---
     private lateinit var player1: ExoPlayer
     private lateinit var player2: ExoPlayer
     
-    lateinit var player: ExoPlayer
+    // The public player is now a stable ForwardingPlayer that never changes instance.
+    lateinit var player: ForwardingPlayer
     
     private var crossfadeCheckJob: Job? = null
     private var crossfadeJob: Job? = null
+    // ------------------------------------
 
     private lateinit var mediaSession: MediaLibrarySession
 
@@ -181,14 +185,19 @@ class MusicService :
             },
         )
 
+        // Initialize the two real players
         player1 = createPlayer()
         player2 = createPlayer()
-        player = player1
+        
+        // Initialize the ForwardingPlayer, pointing to player1 initially.
+        // This is the single, stable player instance exposed to the rest of the app.
+        player = ForwardingPlayer(player1)
 
         mediaLibrarySessionCallback.apply {
             toggleLike = ::toggleLike
             toggleLibrary = ::toggleLibrary
         }
+        // The MediaSession is now given the stable ForwardingPlayer.
         mediaSession =
             MediaLibrarySession
                 .Builder(this, player, mediaLibrarySessionCallback)
@@ -209,15 +218,19 @@ class MusicService :
 
         connectivityManager = getSystemService()!!
 
+        // The sleep timer also listens to the stable ForwardingPlayer.
         sleepTimer = SleepTimer(scope, player)
         player.addListener(sleepTimer)
 
         combine(playerVolume, normalizeFactor) { playerVolume, normalizeFactor ->
             playerVolume * normalizeFactor
         }.collectLatest(scope) {
+            // This now correctly applies volume to whichever player is currently active
+            // via the ForwardingPlayer.
             player.volume = it
         }
 
+        // ... rest of onCreate logic is the same ...
         playerVolume.debounce(1000).collect(scope) { volume ->
             dataStore.edit { settings ->
                 settings[PlayerVolumeKey] = volume
@@ -354,6 +367,7 @@ class MusicService :
             .setSeekForwardIncrementMs(5000)
             .build()
             .apply {
+                // We add the service as a listener to both real players.
                 addListener(this@MusicService)
                 addAnalyticsListener(PlaybackStatsListener(false, this@MusicService))
             }
@@ -364,6 +378,7 @@ class MusicService :
         crossfadeCheckJob = scope.launch {
             while (isActive) {
                 val crossfadeEnabled = dataStore.get(CrossfadeEnabledKey, false)
+                // We check the state of the public ForwardingPlayer
                 if (crossfadeEnabled && player.isPlaying && player.hasNextMediaItem()) {
                     val currentPosition = player.currentPosition
                     val duration = player.duration
@@ -387,8 +402,9 @@ class MusicService :
     private fun initiatePlayerSwap() {
         if (crossfadeJob?.isActive == true) return
 
-        val playerOut = player
-        val playerIn = if (player === player1) player2 else player1
+        // Determine which real player is incoming and which is outgoing.
+        val playerOut = player.wrappedPlayer as ExoPlayer
+        val playerIn = if (playerOut === player1) player2 else player1
 
         playerIn.seekTo(playerOut.currentMediaItemIndex + 1, 0)
 
@@ -426,70 +442,46 @@ class MusicService :
         }
     }
 
-    // --- START OF THE CRITICAL FIX ---
     private fun onCrossfadeComplete(oldPlayer: ExoPlayer, newPlayer: ExoPlayer) {
-        // الخطوة 1: قم بتعيين المشغل الجديد كالمشغل النشط على الفور
-        player = newPlayer
-        player.volume = playerVolume.value // تأكد من أن مستوى الصوت صحيح
-
-        // الخطوة 2: أخبر MediaSession بالمشغل الجديد **قبل** إيقاف القديم
-        mediaSession.player = player
-
-        // الخطوة 3: قم بتبديل أي مستمعين (listeners) يعتمدون على الحالة
-        oldPlayer.removeListener(sleepTimer)
-        player.addListener(sleepTimer)
-
-        // الخطوة 4: قم بتحديث بيانات الواجهة والإشعار بناءً على المشغل الجديد
+        // The only thing we need to do is switch the delegate of the ForwardingPlayer.
+        player.setPlayer(newPlayer)
+        
+        // Ensure volume is correctly set on the new player.
+        newPlayer.volume = playerVolume.value
+        
+        // Since the UI and MediaSession are already listening to the stable `ForwardingPlayer`,
+        // they will automatically get updates from the newPlayer now.
+        // We just need to update our internal metadata state.
         currentMediaMetadata.value = player.currentMetadata
-        updateNotification()
-
-        // الخطوة 5: الآن، وبعد أن تم تحديث كل شيء، قم بإيقاف المشغل القديم
+        
+        // Stop the old player after the switch is complete.
         oldPlayer.playWhenReady = false
         oldPlayer.stop()
     }
-    // --- END OF THE CRITICAL FIX ---
 
     private fun updateNotification() {
         mediaSession.setCustomLayout(
             listOf(
-                CommandButton
-                    .Builder()
-                    .setDisplayName(
-                        getString(
-                            if (currentSong.value?.song?.liked == true) R.string.action_remove_like
-                            else R.string.action_like,
-                        ),
-                    )
+                CommandButton.Builder()
+                    .setDisplayName(getString(if (currentSong.value?.song?.liked == true) R.string.action_remove_like else R.string.action_like))
                     .setIconResId(if (currentSong.value?.song?.liked == true) R.drawable.favorite else R.drawable.favorite_border)
-                    .setSessionCommand(CommandToggleLike)
-                    .setEnabled(currentSong.value != null)
-                    .build(),
-                CommandButton
-                    .Builder()
-                    .setDisplayName(
-                        getString(
-                            when (player.repeatMode) {
-                                REPEAT_MODE_OFF -> R.string.repeat_mode_off
-                                REPEAT_MODE_ONE -> R.string.repeat_mode_one
-                                REPEAT_MODE_ALL -> R.string.repeat_mode_all
-                                else -> throw IllegalStateException()
-                            },
-                        ),
-                    ).setIconResId(
-                        when (player.repeatMode) {
+                    .setSessionCommand(CommandToggleLike).setEnabled(currentSong.value != null).build(),
+                CommandButton.Builder()
+                    .setDisplayName(getString(when (player.repeatMode) {
+                            REPEAT_MODE_OFF -> R.string.repeat_mode_off
+                            REPEAT_MODE_ONE -> R.string.repeat_mode_one
+                            REPEAT_MODE_ALL -> R.string.repeat_mode_all
+                            else -> throw IllegalStateException()
+                        })).setIconResId(when (player.repeatMode) {
                             REPEAT_MODE_OFF -> R.drawable.repeat
                             REPEAT_MODE_ONE -> R.drawable.repeat_one_on
                             REPEAT_MODE_ALL -> R.drawable.repeat_on
                             else -> throw IllegalStateException()
-                        },
-                    ).setSessionCommand(CommandToggleRepeatMode)
-                    .build(),
-                CommandButton
-                    .Builder()
+                        }).setSessionCommand(CommandToggleRepeatMode).build(),
+                CommandButton.Builder()
                     .setDisplayName(getString(if (player.shuffleModeEnabled) R.string.action_shuffle_off else R.string.action_shuffle_on))
                     .setIconResId(if (player.shuffleModeEnabled) R.drawable.shuffle_on else R.drawable.shuffle)
-                    .setSessionCommand(CommandToggleShuffle)
-                    .build(),
+                    .setSessionCommand(CommandToggleShuffle).build(),
             ),
         )
     }
@@ -560,8 +552,8 @@ class MusicService :
             player2.prepare()
             player2.playWhenReady = false
 
-            player = player1
-            mediaSession.player = player
+            // Ensure the ForwardingPlayer points to the starting player.
+            player.setPlayer(player1)
             player.shuffleModeEnabled = false
         }
     }
@@ -743,10 +735,11 @@ class MusicService :
     }
 
     override fun onEvents(
-        currentPlayer: Player,
+        realPlayer: Player,
         events: Player.Events,
     ) {
-        if (currentPlayer !== player) return
+        // We only care about events from the player that is currently active.
+        if (realPlayer !== player.wrappedPlayer) return
 
         if (events.containsAny(
                 Player.EVENT_PLAYBACK_STATE_CHANGED,
@@ -754,15 +747,15 @@ class MusicService :
             )
         ) {
             val isBufferingOrReady =
-                currentPlayer.playbackState == Player.STATE_BUFFERING || currentPlayer.playbackState == Player.STATE_READY
-            if (isBufferingOrReady && currentPlayer.playWhenReady) {
+                realPlayer.playbackState == Player.STATE_BUFFERING || realPlayer.playbackState == Player.STATE_READY
+            if (isBufferingOrReady && realPlayer.playWhenReady) {
                 openAudioEffectSession()
             } else {
                 closeAudioEffectSession()
             }
         }
         if (events.containsAny(EVENT_TIMELINE_CHANGED, EVENT_POSITION_DISCONTINUITY)) {
-            currentMediaMetadata.value = currentPlayer.currentMetadata
+            currentMediaMetadata.value = realPlayer.currentMetadata
         }
     }
 
@@ -1010,6 +1003,8 @@ class MusicService :
 
         player2.removeListener(this)
         player2.release()
+        
+        // The ForwardingPlayer does not need to be released, as it's just a wrapper.
 
         super.onDestroy()
     }

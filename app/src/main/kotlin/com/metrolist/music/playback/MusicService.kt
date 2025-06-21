@@ -155,7 +155,9 @@ class CrossfadeManager(
 ) {
     private var secondaryPlayer: ExoPlayer? = null
     private var crossfadeJob: Job? = null
-    private var isCrossfading = false
+    private var _isCrossfading = false
+    val isCrossfading: Boolean
+        get() = _isCrossfading
     
     private val _crossfadeEnabled = MutableStateFlow(false)
     val crossfadeEnabled = _crossfadeEnabled.asStateFlow()
@@ -169,9 +171,9 @@ class CrossfadeManager(
     }
     
     fun startCrossfade(nextMediaItem: MediaItem) {
-        if (!crossfadeEnabled.value || isCrossfading) return
+        if (!crossfadeEnabled.value || _isCrossfading) return
         
-        isCrossfading = true
+        _isCrossfading = true
         crossfadeJob?.cancel()
         
         secondaryPlayer = createSecondaryPlayer().apply {
@@ -203,11 +205,23 @@ class CrossfadeManager(
         completeCrossfade()
     }
     
-    private fun completeCrossfade() {  
+    private fun completeCrossfade() {
         secondaryPlayer?.let { secondary ->
-            val currentPosition = secondary.currentPosition
-            
-            primaryPlayer.seekTo(currentPosition)
+            var currentPosition = secondary.currentPosition
+            val nextMediaItemIndex = primaryPlayer.currentMediaItemIndex + 1
+            val nextMediaItemDuration = secondary.duration
+
+            val endBufferMs = 500L 
+
+            if (nextMediaItemDuration > 0 && currentPosition >= nextMediaItemDuration - endBufferMs) {
+                currentPosition = maxOf(0L, nextMediaItemDuration - endBufferMs - 100L) 
+            }
+
+            if (primaryPlayer.currentMediaItemIndex < nextMediaItemIndex) {
+                primaryPlayer.seekTo(nextMediaItemIndex, currentPosition)
+            } else if (primaryPlayer.currentMediaItemIndex == nextMediaItemIndex) {
+                primaryPlayer.seekTo(currentPosition)
+            }
             
             primaryPlayer.volume = 1f
             primaryPlayer.playWhenReady = true
@@ -216,7 +230,7 @@ class CrossfadeManager(
             secondaryPlayer = null
         }
         
-        isCrossfading = false
+        _isCrossfading = false
     }
     
     private fun createSecondaryPlayer(): ExoPlayer {
@@ -234,18 +248,36 @@ class CrossfadeManager(
     }
     
     fun shouldStartCrossfade(currentPosition: Long, duration: Long): Boolean {
-        if (!crossfadeEnabled.value || isCrossfading) return false
+        if (!crossfadeEnabled.value || _isCrossfading) return false
         
         val crossfadeDurationMs = crossfadeDuration.value * 1000L
         val timeRemaining = duration - currentPosition
         
-        return timeRemaining <= crossfadeDurationMs && timeRemaining > 0
+        return timeRemaining <= crossfadeDurationMs && timeRemaining > 0 && primaryPlayer.hasNextMediaItem()
     }
     
     fun release() {
         crossfadeJob?.cancel()
         secondaryPlayer?.release()
         secondaryPlayer = null
+        _isCrossfading = false
+    }
+
+    fun abortCrossfadeAndSkip(skipNext: Boolean) {
+        if (!_isCrossfading) return
+
+        crossfadeJob?.cancel()
+        secondaryPlayer?.release()
+        secondaryPlayer = null
+        _isCrossfading = false
+
+        if (skipNext) {
+            primaryPlayer.seekToNextMediaItem()
+        } else {
+            primaryPlayer.seekToPreviousMediaItem()
+        }
+        primaryPlayer.volume = 1f
+        primaryPlayer.playWhenReady = true
     }
 }
 

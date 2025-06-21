@@ -155,7 +155,7 @@ class CrossfadeManager(
 ) {
     private var secondaryPlayer: ExoPlayer? = null
     private var crossfadeJob: Job? = null
-    val isCrossfading = false
+    private var isCrossfading = false
 
     private val _crossfadeEnabled = MutableStateFlow(false)
     val crossfadeEnabled = _crossfadeEnabled.asStateFlow()

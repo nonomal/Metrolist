@@ -234,19 +234,17 @@ class CrossfadeManager(
     }
 
     /**
-     * Completes the crossfade by transitioning the primary player to the new track
+     * Completes the crossfade by syncing the primary player's position
      * and releasing the secondary player. This is the key to a seamless switch.
      */
     private fun completeCrossfade() {
         secondaryPlayer?.let { secondary ->
-            // Crucial step: Make the primary player move to the next item in its playlist.
-            // This ensures its internal state is correct for the new track.
-            if (primaryPlayer.hasNextMediaItem()) {
-                primaryPlayer.seekToNextMediaItem()
-            }
-            
+            // DO NOT call seekToNextMediaItem(). ExoPlayer handles this transition automatically
+            // when a track ends. We just need to sync the position.
+
             // Sync the primary player's position to the secondary player's current position.
-            // Since the primary player is now on the new track, this seek is seamless.
+            // Since the primary player has already moved to the new track automatically,
+            // this seek will be on the correct item and will be seamless.
             primaryPlayer.seekTo(secondary.currentPosition)
 
             // Restore primary player volume and ensure it's playing.
@@ -293,6 +291,7 @@ class CrossfadeManager(
         val crossfadeDurationMs = crossfadeDuration.value * 1000L
         val timeRemaining = duration - currentPosition
 
+        // Use a small minimum value (e.g., 1ms) to avoid triggering on the exact end of the track.
         return timeRemaining in 1..crossfadeDurationMs
     }
 

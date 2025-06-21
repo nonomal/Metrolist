@@ -280,11 +280,6 @@ class CrossfadeManager(
         secondaryPlayer = null
         _isCrossfading = false
 
-        if (skipNext) {
-            primaryPlayer.seekToNextMediaItem()
-        } else {
-            primaryPlayer.seekToPreviousMediaItem()
-        }
         primaryPlayer.volume = 1f
         primaryPlayer.playWhenReady = true
     }
@@ -405,9 +400,6 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
         mediaLibrarySessionCallback.apply {
             toggleLike = ::toggleLike
             toggleLibrary = ::toggleLibrary
-            // Add skip functions to MediaLibrarySessionCallback
-            skipToNext = { crossfadeManager.abortCrossfadeAndSkip(true) }
-            skipToPrevious = { crossfadeManager.abortCrossfadeAndSkip(false) }
         }
         mediaSession =
             MediaLibrarySession

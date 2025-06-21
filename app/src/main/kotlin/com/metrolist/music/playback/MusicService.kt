@@ -145,7 +145,7 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.time.Duration.Companion.seconds
 
-// CrossfadeManager Class
+// CrossfadeManager
 class CrossfadeManager(
     private val scope: CoroutineScope,
     private val primaryPlayer: ExoPlayer,
@@ -155,94 +155,89 @@ class CrossfadeManager(
 ) {
     private var secondaryPlayer: ExoPlayer? = null
     private var crossfadeJob: Job? = null
-    private var _isCrossfading = false
-    val isCrossfading: Boolean
-        get() = _isCrossfading
-    
+    private var isCrossfading = false
+
     private val _crossfadeEnabled = MutableStateFlow(false)
     val crossfadeEnabled = _crossfadeEnabled.asStateFlow()
-    
+
     private val _crossfadeDuration = MutableStateFlow(3)
     val crossfadeDuration = _crossfadeDuration.asStateFlow()
-    
+
     fun updateSettings(enabled: Boolean, duration: Int) {
         _crossfadeEnabled.value = enabled
         _crossfadeDuration.value = duration
     }
-    
+
     fun startCrossfade(nextMediaItem: MediaItem) {
-        if (!crossfadeEnabled.value || _isCrossfading) return
-        
-        _isCrossfading = true
+        if (!crossfadeEnabled.value || isCrossfading || primaryPlayer.repeatMode == Player.REPEAT_MODE_ONE) return
+
+        isCrossfading = true
         crossfadeJob?.cancel()
-        
+
+        // إنشاء وتجهيز المشغل الثانوي
         secondaryPlayer = createSecondaryPlayer().apply {
             setMediaItem(nextMediaItem)
             prepare()
-            volume = 0f
+            volume = 0f // ابدأ بصوت مكتوم
             playWhenReady = true
         }
-        
+
         crossfadeJob = scope.launch {
+            // انتظر حتى يبدأ المشغل الثانوي في التشغيل فعليًا
+            // هذا يضمن أن الأغنية جاهزة قبل بدء التلاشي
+            while (secondaryPlayer?.isPlaying == false && isActive) {
+                delay(50)
+            }
             performCrossfade()
         }
     }
-    
+
     private suspend fun performCrossfade() {
         val duration = crossfadeDuration.value * 1000L
         val steps = 50
         val stepDuration = duration / steps
-        
+
+        // تنفيذ التلاشي المتداخل
         repeat(steps) { step ->
-            val progress = step.toFloat() / steps
-            
+            val progress = (step + 1).toFloat() / steps
             primaryPlayer.volume = 1f - progress
             secondaryPlayer?.volume = progress
-            
             delay(stepDuration)
         }
         
+        // استدعاء دالة الإكمال بعد انتهاء التلاشي
         completeCrossfade()
     }
-    
+
     private fun completeCrossfade() {
+        // تأكد من وجود المشغل الثانوي
         secondaryPlayer?.let { secondary ->
-            var currentPosition = secondary.currentPosition
-            val nextMediaItemIndex = primaryPlayer.currentMediaItemIndex + 1
-            val nextMediaItemDuration = secondary.duration
-
-            val endBufferMs = 500L 
-
-            // Only adjust if the next media item has a valid duration and we are close to the end
-            if (nextMediaItemDuration > 0 && currentPosition >= nextMediaItemDuration - endBufferMs) {
-                // Adjust position slightly back to ensure it\'s not considered \'ended\'
-                currentPosition = maxOf(0L, nextMediaItemDuration - endBufferMs - 100L) 
-            }
-
-            // Check if the primary player has already advanced to the next item (e.g., due to manual skip)
-            // If it has, we don\'t need to seek again, just ensure volume is correct.
-            if (primaryPlayer.currentMediaItemIndex == nextMediaItemIndex) {
-                // If already on the correct item, just seek to the position and restore volume
-                primaryPlayer.seekTo(currentPosition)
-            } else if (primaryPlayer.currentMediaItemIndex < nextMediaItemIndex) {
-                // If still on the previous item, seek to the next item at the adjusted position
-                primaryPlayer.seekTo(nextMediaItemIndex, currentPosition)
-            } else {
-                // If primaryPlayer has skipped past the target item (e.g., multiple manual skips),
-                // we do nothing here to avoid interfering further.
+            // انتقل إلى الأغنية التالية في المشغل الأساسي
+            // هذا يضمن أن الـ UI والحالة العامة للتطبيق تتحدث بشكل صحيح
+            if (primaryPlayer.hasNextMediaItem()) {
+                primaryPlayer.seekToNextMediaItem()
             }
             
+            // انقل الموضع من المشغل الثانوي إلى الأساسي
+            // الآن `seekTo` ستعمل على الأغنية الصحيحة (الجديدة)
+            primaryPlayer.seekTo(secondary.currentPosition)
+
+            // أعد الصوت إلى المستوى الطبيعي
             primaryPlayer.volume = 1f
-            primaryPlayer.playWhenReady = true
             
+            // تأكد من أن المشغل الأساسي في حالة تشغيل
+            primaryPlayer.playWhenReady = true
+
+            // حرر المشغل الثانوي
             secondary.release()
             secondaryPlayer = null
         }
         
-        _isCrossfading = false
+        isCrossfading = false
     }
-    
+
     private fun createSecondaryPlayer(): ExoPlayer {
+        // استخدم نفس إعدادات المشغل الأساسي قدر الإمكان
         return ExoPlayer.Builder(context)
             .setMediaSourceFactory(createMediaSourceFactory())
             .setRenderersFactory(createRenderersFactory())
@@ -251,37 +246,28 @@ class CrossfadeManager(
                     .setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                     .build(),
-                false
+                false // لا تدير AudioFocus للمشغل الثانوي
             )
             .build()
     }
-    
+
     fun shouldStartCrossfade(currentPosition: Long, duration: Long): Boolean {
-        if (!crossfadeEnabled.value || _isCrossfading) return false
-        
+        if (!crossfadeEnabled.value || isCrossfading) return false
+
+        // لا تقم بالتلاشي إذا كانت الأغنية الحالية هي الأخيرة في القائمة (ما لم يكن التكرار مفعلًا)
+        if (!primaryPlayer.hasNextMediaItem() && primaryPlayer.repeatMode != REPEAT_MODE_ALL) return false
+
         val crossfadeDurationMs = crossfadeDuration.value * 1000L
         val timeRemaining = duration - currentPosition
-        
-        return timeRemaining <= crossfadeDurationMs && timeRemaining > 0 && primaryPlayer.hasNextMediaItem()
+
+        return timeRemaining <= crossfadeDurationMs && timeRemaining > 0
     }
-    
+
     fun release() {
         crossfadeJob?.cancel()
         secondaryPlayer?.release()
         secondaryPlayer = null
-        _isCrossfading = false
-    }
-
-    fun abortCrossfadeAndSkip(skipNext: Boolean) {
-        if (!_isCrossfading) return
-
-        crossfadeJob?.cancel()
-        secondaryPlayer?.release()
-        secondaryPlayer = null
-        _isCrossfading = false
-
-        primaryPlayer.volume = 1f
-        primaryPlayer.playWhenReady = true
+        isCrossfading = false
     }
 }
 

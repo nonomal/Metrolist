@@ -207,8 +207,6 @@ class CrossfadeManager(
         secondaryPlayer?.let { secondary ->
             val currentPosition = secondary.currentPosition
             
-            primaryPlayer.seekToNextMediaItem()
-            
             primaryPlayer.seekTo(currentPosition)
             
             primaryPlayer.volume = 1f

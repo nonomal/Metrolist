@@ -1062,11 +1062,52 @@ class MusicService :
         }
     }
 
+    override fun onDestroy() {
+        if (dataStore.get(PersistentQueueKey, true)) {
+            saveQueueToDisk()
+        }
+        if (discordRpc?.isRpcRunning() == true) {
+            discordRpc?.closeRPC()
+        }
+        discordRpc = null
+        
+        // Clean up crossfade resources
+        crossfadeCheckJob?.cancel()
+        crossfadeManager.release()
+        
+        mediaSession.release()
+        player.removeListener(this)
+        player.removeListener(sleepTimer)
+        player.release()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?) = super.onBind(intent) ?: binder
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        stopSelf()
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = mediaSession
+
+    inner class MusicBinder : Binder() {
+        val service: MusicService
+            get() = this@MusicService
+    }
+
     companion object {
-        private const val NOTIFICATION_ID = 1
-        private const val CHANNEL_ID = "music_playback"
-        private const val PERSISTENT_QUEUE_FILE = "queue.bin"
-        private const val PERSISTENT_AUTOMIX_FILE = "automix.bin"
-        private const val CHUNK_LENGTH = 256 * 1024L
+        const val ROOT = "root"
+        const val SONG = "song"
+        const val ARTIST = "artist"
+        const val ALBUM = "album"
+        const val PLAYLIST = "playlist"
+
+        const val CHANNEL_ID = "music_channel_01"
+        const val NOTIFICATION_ID = 888
+        const val ERROR_CODE_NO_STREAM = 1000001
+        const val CHUNK_LENGTH = 512 * 1024L
+        const val PERSISTENT_QUEUE_FILE = "persistent_queue.data"
+        const val PERSISTENT_AUTOMIX_FILE = "persistent_automix.data"
     }
 }

@@ -203,15 +203,14 @@ class CrossfadeManager(
         completeCrossfade()
     }
     
-    private fun completeCrossfade() {
-        primaryPlayer.pause()
-        
+    private fun completeCrossfade() {  
         secondaryPlayer?.let { secondary ->
             val currentPosition = secondary.currentPosition
-            val mediaItem = secondary.currentMediaItem
             
-            primaryPlayer.setMediaItem(mediaItem!!)
+            primaryPlayer.seekToNextMediaItem()
+            
             primaryPlayer.seekTo(currentPosition)
+            
             primaryPlayer.volume = 1f
             primaryPlayer.playWhenReady = true
             

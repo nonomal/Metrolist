@@ -57,6 +57,8 @@
     <string name="sort_by_last_updated">Date updated</string>
     <string name="link_copied">Link copied to clipboard</string>
 
+    <string name="artist">Artist</string>
+
     <string name="lyrics">Lyrics</string>
 
     <string name="already_in_playlist">Already in playlist:</string>

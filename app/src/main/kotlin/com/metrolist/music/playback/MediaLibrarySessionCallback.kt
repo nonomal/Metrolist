@@ -451,10 +451,10 @@ override fun onGetSearchResult(
 
             val artistItems = artists.map {
                 browsableMediaItem(
-                    id = "${MusicService.ARTIST}/${it.id}",
-                    title = it.name,
+                    id = "${MusicService.ARTIST}/${it.artist.id}",
+                    title = it.artist.name,
                     subtitle = context.getString(R.string.artist),
-                    iconUri = it.thumbnailUrl?.toUri(),
+                    iconUri = it.artist.thumbnailUrl?.toUri(),
                     mediaType = MediaMetadata.MEDIA_TYPE_ARTIST
                 )
             }

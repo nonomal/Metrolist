@@ -390,20 +390,21 @@ constructor(
 
                 MusicService.SEARCH -> {
                     val songId = path.getOrNull(2) ?: return@future defaultResult
-                    val searchQuery = path.getOrNull(1) ?: return@future defaultResult
+                    val query = path.getOrNull(1) ?: return@future defaultResult
                     var results = combine(
-                        database.searchSongs(searchQuery),
-                        database.searchArtists(searchQuery),
-                    ) { songs, artistSongs ->
-                        (songs + artistSongs).distinctBy { it.id }
+                        database.searchSongs(query),
+                        database.searchArtists(query),
+                    ) { songs, artists ->
+                        (songs + artists).distinctBy { it.id }
                     }
 
                     val items = results.first().map { it.toMediaItem() }
-                    val index = items.indexOfFirst { it.mediaId == songId }
+                    val index = items.indexOfFirst { it.id == songId }
                     MediaSession.MediaItemsWithStartPosition(
                         items, 
                         if (index > 0) index
-                        else 0
+                        else 0,
+                        startPositionMs
                     )
                 }
 

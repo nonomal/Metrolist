@@ -437,7 +437,7 @@ constructor(
             try {
                 var results = combine(
                     database.searchSongs(query),
-                    database.searchArtistSongs(query),
+                    database.searchArtists(query),
                 ) { songs, artistSongs ->
                     (songs + artistSongs).distinctBy { it.id }
                 }

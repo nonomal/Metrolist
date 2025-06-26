@@ -26,6 +26,7 @@ import com.metrolist.music.constants.SongSortType
 import com.metrolist.music.db.MusicDatabase
 import com.metrolist.music.db.entities.PlaylistEntity
 import com.metrolist.music.db.entities.Song
+import com.metrolist.music.extensions.metadata
 import com.metrolist.music.extensions.toMediaItem
 import com.metrolist.music.extensions.toggleRepeatMode
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -49,6 +50,7 @@ constructor(
 ) : MediaLibrarySession.Callback {
     private val TAG = MediaLibrarySessionCallback::class.simpleName.toString()
     private val scope = CoroutineScope(Dispatchers.Main) + Job()
+    lateinit var service: MusicService
     var toggleLike: () -> Unit = {}
     var toggleStartRadio: () -> Unit = {}
     var toggleLibrary: () -> Unit = {}
@@ -298,19 +300,19 @@ constructor(
         mediaItems: MutableList<MediaItem>,
         startIndex: Int,
         startPositionMs: Long,
-    ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> =
+    ): ListenableFuture<MediaItemsWithStartPosition> =
         scope.future {
             // Play from Android Auto
             val defaultResult =
-                MediaSession.MediaItemsWithStartPosition(emptyList(), startIndex, startPositionMs)
+                MediaItemsWithStartPosition(emptyList(), startIndex, startPositionMs)
             val path =
                 mediaItems.firstOrNull()?.mediaId?.split("/")
                     ?: return@future defaultResult
-            when (path.firstOrNull()) {
+            val queue: Triple<List<MediaItem>, Int, Long> = when (path.firstOrNull()) {
                 MusicService.SONG -> {
                     val songId = path.getOrNull(1) ?: return@future defaultResult
                     val allSongs = database.songsByCreateDateAsc().first()
-                    MediaSession.MediaItemsWithStartPosition(
+                    Triple(
                         allSongs.map { it.toMediaItem() },
                         allSongs.indexOfFirst { it.id == songId }.takeIf { it != -1 } ?: 0,
                         startPositionMs,
@@ -321,7 +323,7 @@ constructor(
                     val songId = path.getOrNull(2) ?: return@future defaultResult
                     val artistId = path.getOrNull(1) ?: return@future defaultResult
                     val songs = database.artistSongsByCreateDateAsc(artistId).first()
-                    MediaSession.MediaItemsWithStartPosition(
+                    Triple(
                         songs.map { it.toMediaItem() },
                         songs.indexOfFirst { it.id == songId }.takeIf { it != -1 } ?: 0,
                         startPositionMs,
@@ -333,7 +335,7 @@ constructor(
                     val albumId = path.getOrNull(1) ?: return@future defaultResult
                     val albumWithSongs =
                         database.albumWithSongs(albumId).first() ?: return@future defaultResult
-                    MediaSession.MediaItemsWithStartPosition(
+                    Triple(
                         albumWithSongs.songs.map { it.toMediaItem() },
                         albumWithSongs.songs.indexOfFirst { it.id == songId }.takeIf { it != -1 }
                             ?: 0,
@@ -373,15 +375,27 @@ constructor(
                                     list.map { it.song }
                                 }
                         }.first()
-                    MediaSession.MediaItemsWithStartPosition(
+                    Triple(
                         songs.map { it.toMediaItem() },
                         songs.indexOfFirst { it.id == songId }.takeIf { it != -1 } ?: 0,
                         startPositionMs,
                     )
                 }
 
-                else -> defaultResult
+                else -> Triple(emptyList<MediaItem>(), startIndex, startPositionMs)
             }
+
+            val queueTitle = context.getString(R.string.android_auto)
+            service.queueBoard.addQueue(
+                queueTitle,
+                queue.first.map { it.metadata },
+                shuffled = false,
+                replace = true,
+                delta = false,
+                startIndex = queue.second
+            )
+            service.queueTitle = queueTitle
+            MediaItemsWithStartPosition(queue.first, queue.second, queue.third)
         }
 
     override fun onSearch(

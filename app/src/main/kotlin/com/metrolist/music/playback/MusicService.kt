@@ -1112,7 +1112,6 @@ class MusicService :
                         player.volume = 0.2f
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> {
-                        hasAudioFocus = true
                         player.volume = playerVolume.value
                         // Only resume if music was playing before focus loss and not paused by user
                         if (wasPlayingBeforeFocusLoss && !pausedByUser) {

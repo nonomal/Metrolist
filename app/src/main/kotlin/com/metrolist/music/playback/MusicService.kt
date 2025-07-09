@@ -824,12 +824,10 @@ class MusicService :
                 }
                 hasAudioFocus = true
             }
-            pausedByUser = false
         } else {
             if (hasAudioFocus && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
                 abandonAudioFocus()
                 hasAudioFocus = false
-                pausedByUser = true
             }
         }
     }
@@ -1097,7 +1095,7 @@ class MusicService :
 
         val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
             .setAudioAttributes(legacyAttributes)
-            .setAcceptsDelayedFocusGain(true)
+            .setAcceptsDelayedFocusGain(false)
             .setWillPauseWhenDucked(false)
             .setOnAudioFocusChangeListener { focusChange ->
                 when (focusChange) {
@@ -1113,21 +1111,28 @@ class MusicService :
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                         player.volume = 0.2f
                     }
-                    AudioManager.AUDIOFOCUS_GAIN, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT -> {
+                    AudioManager.AUDIOFOCUS_GAIN -> {
                         hasAudioFocus = true
                         player.volume = playerVolume.value
-                        if (wasPlayingBeforeFocusLoss) {
-                        player.play()
+                        // Only resume if music was playing before focus loss and not paused by user
+                        if (wasPlayingBeforeFocusLoss && !pausedByUser) {
+                            player.play()
                         }
                         wasPlayingBeforeFocusLoss = false
+                    }
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT -> {
+                        hasAudioFocus = true
+                        player.volume = playerVolume.value
+                        if (!pausedByUser) {
+                            player.play()
+                        }
                     }
                 }
             }.build()
 
         audioFocusRequest = focusRequest
         val result = audioManager.requestAudioFocus(focusRequest)
-        return result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED || 
-            result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED
+        return result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     }
 
     private fun abandonAudioFocus() {

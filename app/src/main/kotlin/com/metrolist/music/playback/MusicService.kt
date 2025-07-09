@@ -169,6 +169,7 @@ class MusicService :
     private var audioFocusRequest: AudioFocusRequest? = null
     private var hasAudioFocus = false
     private var wasPlayingBeforeFocusLoss = false
+    private var pausedByFocusLoss = false
     private var pausedByUser = false
 
     private var scope = CoroutineScope(Dispatchers.Main) + Job()
@@ -846,11 +847,12 @@ class MusicService :
         // Track if user manually paused/played
         if (!isPlaying && player.playbackState != Player.STATE_IDLE) {
             // Check if this pause was not caused by audio focus loss
-            if (!wasPlayingBeforeFocusLoss && hasAudioFocus) {
+            if (!wasPlayingBeforeFocusLoss && !pausedByFocusLoss) {
                 pausedByUser = true
             }
         } else if (isPlaying) {
             pausedByUser = false
+            pausedByFocusLoss = false
             wasPlayingBeforeFocusLoss = false
         }
     }
@@ -1099,14 +1101,14 @@ class MusicService :
             .setWillPauseWhenDucked(false)
             .setOnAudioFocusChangeListener { focusChange ->
                 when (focusChange) {
-                    AudioManager.AUDIOFOCUS_LOSS -> {
-                        wasPlayingBeforeFocusLoss = player.isPlaying
-                        hasAudioFocus = false
-                        player.pause()
-                    }
+                    AudioManager.AUDIOFOCUS_LOSS,
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                        wasPlayingBeforeFocusLoss = player.isPlaying
-                        player.pause()
+                        if (player.isPlaying) {
+                            wasPlayingBeforeFocusLoss = true
+                            pausedByFocusLoss = true
+                            player.pause()
+                        }
+                        hasAudioFocus = false
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                         player.volume = 0.2f
@@ -1114,11 +1116,11 @@ class MusicService :
                     AudioManager.AUDIOFOCUS_GAIN -> {
                         hasAudioFocus = true
                         player.volume = playerVolume.value
-                        // Only resume if music was playing before focus loss and not paused by user
                         if (wasPlayingBeforeFocusLoss && !pausedByUser) {
                             player.play()
                         }
                         wasPlayingBeforeFocusLoss = false
+                        pausedByFocusLoss = false
                     }
                     AudioManager.AUDIOFOCUS_GAIN_TRANSIENT -> {
                         hasAudioFocus = true

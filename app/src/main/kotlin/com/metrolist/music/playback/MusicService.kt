@@ -1101,7 +1101,6 @@ class MusicService :
                 when (focusChange) {
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         wasPlayingBeforeFocusLoss = player.isPlaying
-                        hasAudioFocus = false
                         player.pause()
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
@@ -1138,7 +1137,6 @@ class MusicService :
         audioFocusRequest?.let {
             audioManager.abandonAudioFocusRequest(it)
         }
-        hasAudioFocus = false
     }
 
     // Optional: Add this method to reset the state when needed

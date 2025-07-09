@@ -1121,9 +1121,7 @@ class MusicService :
                     AudioManager.AUDIOFOCUS_GAIN_TRANSIENT -> {
                         hasAudioFocus = true
                         player.volume = playerVolume.value
-                        if (!pausedByUser) {
-                            player.play()
-                        }
+                        player.play()
                     }
                 }
             }.build()

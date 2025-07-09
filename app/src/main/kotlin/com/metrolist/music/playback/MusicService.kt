@@ -846,7 +846,7 @@ class MusicService :
         // Track if user manually paused/played
         if (!isPlaying && player.playbackState != Player.STATE_IDLE) {
             // Check if this pause was not caused by audio focus loss
-            if (!wasPlayingBeforeFocusLoss) {
+            if (!wasPlayingBeforeFocusLoss && hasAudioFocus) {
                 pausedByUser = true
             }
         } else if (isPlaying) {

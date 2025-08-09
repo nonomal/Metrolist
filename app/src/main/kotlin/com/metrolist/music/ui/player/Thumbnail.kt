@@ -37,6 +37,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,16 +62,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.fastForEach
 import androidx.media3.common.C
 import androidx.media3.common.Player
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.metrolist.music.LocalPlayerConnection
 import com.metrolist.music.R
 import com.metrolist.music.constants.PlayerBackgroundStyle
 import com.metrolist.music.constants.PlayerBackgroundStyleKey
 import com.metrolist.music.constants.PlayerHorizontalPadding
-import com.metrolist.music.constants.ShowLyricsKey
+import com.metrolist.music.constants.SeekExtraSeconds
 import com.metrolist.music.constants.SwipeThumbnailKey
 import com.metrolist.music.constants.ThumbnailCornerRadius
-import com.metrolist.music.ui.component.Lyrics
 import com.metrolist.music.utils.rememberEnumPreference
 import com.metrolist.music.utils.rememberPreference
 import kotlinx.coroutines.delay
@@ -82,6 +82,7 @@ import kotlin.math.abs
 fun Thumbnail(
     sliderPositionProvider: () -> Long?,
     modifier: Modifier = Modifier,
+    isPlayerExpanded: Boolean = true, // Add parameter to control swipe based on player state
 ) {
     val playerConnection = LocalPlayerConnection.current ?: return
     val context = LocalContext.current
@@ -92,7 +93,7 @@ fun Thumbnail(
     val mediaMetadata by playerConnection.mediaMetadata.collectAsState()
     val error by playerConnection.error.collectAsState()
     val queueTitle by playerConnection.queueTitle.collectAsState()
-    val showLyrics by rememberPreference(ShowLyricsKey, false)
+
     val swipeThumbnail by rememberPreference(SwipeThumbnailKey, true)
     val canSkipPrevious by playerConnection.canSkipPrevious.collectAsState()
     val canSkipNext by playerConnection.canSkipNext.collectAsState()
@@ -107,7 +108,6 @@ fun Thumbnail(
         PlayerBackgroundStyle.DEFAULT -> MaterialTheme.colorScheme.onBackground
         PlayerBackgroundStyle.BLUR -> Color.White
         PlayerBackgroundStyle.GRADIENT -> Color.White
-        else -> MaterialTheme.colorScheme.onBackground
     }
     
     // Grid state
@@ -117,7 +117,6 @@ fun Thumbnail(
     val timeline = playerConnection.player.currentTimeline
     val currentIndex = playerConnection.player.currentMediaItemIndex
     val shuffleModeEnabled = playerConnection.player.shuffleModeEnabled
-    
     val previousMediaMetadata = if (swipeThumbnail && !timeline.isEmpty) {
         val previousIndex = timeline.getPreviousWindowIndex(
             currentIndex,
@@ -197,27 +196,12 @@ fun Thumbnail(
         }
     }
 
-    // Keep screen on when lyrics are shown
-    DisposableEffect(showLyrics) {
-        currentView.keepScreenOn = showLyrics
-        onDispose { currentView.keepScreenOn = false }
-    }
-
     // Seek on double tap
     var showSeekEffect by remember { mutableStateOf(false) }
     var seekDirection by remember { mutableStateOf("") }
     val layoutDirection = LocalLayoutDirection.current
 
     Box(modifier = modifier) {
-        // Lyrics view
-        AnimatedVisibility(
-            visible = showLyrics && error == null,
-            enter = fadeIn(),
-            exit = fadeOut(),
-        ) {
-            Lyrics(sliderPositionProvider = sliderPositionProvider)
-        }
-
         // Error view
         AnimatedVisibility(
             visible = error != null,
@@ -237,7 +221,7 @@ fun Thumbnail(
 
         // Main thumbnail view
         AnimatedVisibility(
-            visible = !showLyrics && error == null,
+            visible = error == null,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -258,7 +242,6 @@ fun Thumbnail(
                         style = MaterialTheme.typography.titleMedium,
                         color = textBackgroundColor
                     )
-                    
                     // Show album title or queue title
                     val playingFrom = queueTitle ?: mediaMetadata?.album?.title
                     if (!playingFrom.isNullOrBlank()) {
@@ -285,7 +268,7 @@ fun Thumbnail(
                         state = thumbnailLazyGridState,
                         rows = GridCells.Fixed(1),
                         flingBehavior = rememberSnapFlingBehavior(thumbnailSnapLayoutInfoProvider),
-                        userScrollEnabled = swipeThumbnail,
+                        userScrollEnabled = swipeThumbnail && isPlayerExpanded, // Only allow swipe when player is expanded
                         modifier = Modifier.fillMaxSize()
                     ) {
                         items(
@@ -295,6 +278,10 @@ fun Thumbnail(
                                 item.mediaId.ifEmpty { "unknown_${item.hashCode()}" }
                             }
                         ) { item ->
+                            val incrementalSeekSkipEnabled by rememberPreference(SeekExtraSeconds, defaultValue = false)
+                            var skipMultiplier by remember { mutableStateOf(1) }
+                            var lastTapTime by remember { mutableLongStateOf(0L) }
+
                             Box(
                                 modifier = Modifier
                                     .width(horizontalLazyGridItemWidth)
@@ -304,21 +291,33 @@ fun Thumbnail(
                                         detectTapGestures(
                                             onDoubleTap = { offset ->
                                                 val currentPosition = playerConnection.player.currentPosition
+                                                val duration = playerConnection.player.duration
+
+                                                val now = System.currentTimeMillis()
+                                                if (incrementalSeekSkipEnabled && now - lastTapTime < 1000) {
+                                                    skipMultiplier++
+                                                } else {
+                                                    skipMultiplier = 1
+                                                }
+                                                lastTapTime = now
+
+                                                val skipAmount = 5000 * skipMultiplier
+
                                                 if ((layoutDirection == LayoutDirection.Ltr && offset.x < size.width / 2) ||
                                                     (layoutDirection == LayoutDirection.Rtl && offset.x > size.width / 2)
                                                 ) {
                                                     playerConnection.player.seekTo(
-                                                        (currentPosition - 5000).coerceAtLeast(0)
+                                                        (currentPosition - skipAmount).coerceAtLeast(0)
                                                     )
-                                                    seekDirection = context.getString(R.string.seek_backward)
+                                                    seekDirection =
+                                                        context.getString(R.string.seek_backward_dynamic, skipAmount / 1000)
                                                 } else {
                                                     playerConnection.player.seekTo(
-                                                        (currentPosition + 5000).coerceAtMost(
-                                                            playerConnection.player.duration
-                                                        )
+                                                        (currentPosition + skipAmount).coerceAtMost(duration)
                                                     )
-                                                    seekDirection = context.getString(R.string.seek_forward)
+                                                    seekDirection = context.getString(R.string.seek_forward_dynamic, skipAmount / 1000)
                                                 }
+
                                                 showSeekEffect = true
                                             }
                                         )

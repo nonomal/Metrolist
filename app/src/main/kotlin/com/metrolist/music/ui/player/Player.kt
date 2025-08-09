@@ -14,6 +14,8 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.with
 import androidx.compose.foundation.Image
@@ -53,6 +55,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -101,11 +104,12 @@ import androidx.media3.common.Player.STATE_ENDED
 import androidx.media3.common.Player.STATE_READY
 import androidx.palette.graphics.Palette
 import androidx.navigation.NavController
-import coil.ImageLoader
-import coil.compose.AsyncImage
-import coil.imageLoader
-import coil.request.ImageRequest
-import coil.size.Size
+import coil3.ImageLoader
+import coil3.compose.AsyncImage
+import coil3.imageLoader
+import coil3.request.ImageRequest
+import coil3.request.allowHardware
+import coil3.toBitmap
 import com.metrolist.music.LocalDownloadUtil
 import com.metrolist.music.LocalPlayerConnection
 import com.metrolist.music.R
@@ -120,7 +124,6 @@ import com.metrolist.music.ui.theme.PlayerColorExtractor
 import com.metrolist.music.ui.theme.PlayerSliderColors
 import com.metrolist.music.constants.PlayerHorizontalPadding
 import com.metrolist.music.constants.QueuePeekHeight
-import com.metrolist.music.constants.ShowLyricsKey
 import com.metrolist.music.constants.SliderStyle
 import com.metrolist.music.constants.SliderStyleKey
 import com.metrolist.music.extensions.togglePlayPause
@@ -225,13 +228,14 @@ fun BottomSheetPlayer(
     val isPlaying by playerConnection.isPlaying.collectAsState()
     val mediaMetadata by playerConnection.mediaMetadata.collectAsState()
     val currentSong by playerConnection.currentSong.collectAsState(initial = null)
+    val currentLyrics by playerConnection.currentLyrics.collectAsState(initial = null)
     val automix by playerConnection.service.automixItems.collectAsState()
     val repeatMode by playerConnection.repeatMode.collectAsState()
 
     val canSkipPrevious by playerConnection.canSkipPrevious.collectAsState()
     val canSkipNext by playerConnection.canSkipNext.collectAsState()
 
-    var showLyrics by rememberPreference(ShowLyricsKey, defaultValue = false)
+    var showLyricsScreen by remember { mutableStateOf(false) }
 
     val sliderStyle by rememberEnumPreference(SliderStyleKey, SliderStyle.DEFAULT)
 
@@ -249,6 +253,10 @@ fun BottomSheetPlayer(
         mutableStateOf<List<Color>>(emptyList())
     }
     
+    // Previous background states for smooth transitions
+    var previousThumbnailUrl by remember { mutableStateOf<String?>(null) }
+    var previousGradientColors by remember { mutableStateOf<List<Color>>(emptyList()) }
+    
     // Cache for gradient colors to prevent re-extraction for same songs
     val gradientColorsCache = remember { mutableMapOf<String, List<Color>>() }
 
@@ -259,6 +267,15 @@ fun BottomSheetPlayer(
     // Default gradient colors for fallback
     val defaultGradientColors = listOf(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.surfaceVariant)
     val fallbackColor = MaterialTheme.colorScheme.surface.toArgb()
+    
+    // Update previous states when media changes
+    LaunchedEffect(mediaMetadata?.id) {
+        val currentThumbnail = mediaMetadata?.thumbnailUrl
+        if (currentThumbnail != previousThumbnailUrl) {
+            previousThumbnailUrl = currentThumbnail
+            previousGradientColors = gradientColors
+        }
+    }
     
     LaunchedEffect(mediaMetadata?.id, playerBackground) {
         if (playerBackground == PlayerBackgroundStyle.GRADIENT) {
@@ -271,23 +288,23 @@ fun BottomSheetPlayer(
                 } else {
                     val request = ImageRequest.Builder(context)
                         .data(currentMetadata.thumbnailUrl)
-                        .size(Size(PlayerColorExtractor.Config.IMAGE_SIZE, PlayerColorExtractor.Config.IMAGE_SIZE))
+                        .size(PlayerColorExtractor.Config.IMAGE_SIZE, PlayerColorExtractor.Config.IMAGE_SIZE)
                         .allowHardware(false)
-                        .memoryCacheKey("gradient_${currentMetadata.id}")
                         .build()
 
                     val result = runCatching { 
-                        context.imageLoader.execute(request).drawable 
+                        context.imageLoader.execute(request)
                     }.getOrNull()
                     
                     if (result != null) {
-                        val bitmap = result.toBitmap()
-                        val palette = withContext(Dispatchers.Default) {
-                            Palette.from(bitmap)
-                                .maximumColorCount(PlayerColorExtractor.Config.MAX_COLOR_COUNT)
-                                .resizeBitmapArea(PlayerColorExtractor.Config.BITMAP_AREA)
-                                .generate()
-                        }
+                        val bitmap = result.image?.toBitmap()
+                        if (bitmap != null) {
+                            val palette = withContext(Dispatchers.Default) {
+                                Palette.from(bitmap)
+                                    .maximumColorCount(PlayerColorExtractor.Config.MAX_COLOR_COUNT)
+                                    .resizeBitmapArea(PlayerColorExtractor.Config.BITMAP_AREA)
+                                    .generate()
+                            }
                         
                         // Use the new color extraction system
                         val extractedColors = PlayerColorExtractor.extractGradientColors(
@@ -298,6 +315,9 @@ fun BottomSheetPlayer(
                         // Cache the extracted colors
                         gradientColorsCache[currentMetadata.id] = extractedColors
                         gradientColors = extractedColors
+                        } else {
+                            gradientColors = defaultGradientColors
+                        }
                     } else {
                         gradientColors = defaultGradientColors
                     }
@@ -317,7 +337,6 @@ fun BottomSheetPlayer(
             PlayerBackgroundStyle.DEFAULT -> MaterialTheme.colorScheme.onBackground
             PlayerBackgroundStyle.BLUR -> Color.White
             PlayerBackgroundStyle.GRADIENT -> Color.White
-            else -> MaterialTheme.colorScheme.onBackground
         }
 
     val icBackgroundColor =
@@ -325,7 +344,6 @@ fun BottomSheetPlayer(
             PlayerBackgroundStyle.DEFAULT -> MaterialTheme.colorScheme.surface
             PlayerBackgroundStyle.BLUR -> Color.Black
             PlayerBackgroundStyle.GRADIENT -> Color.Black
-            else -> MaterialTheme.colorScheme.surface
         }
 
     val (textButtonColor, iconButtonColor) = when (playerButtonsStyle) {
@@ -445,13 +463,9 @@ fun BottomSheetPlayer(
         }
     }
 
-    // Use fixed dismissedBound to prevent background showing when nav bar disappears (only for new design)
-    val dismissedBound = if (useNewMiniPlayerDesign) {
-        QueuePeekHeight
-    } else {
-        // Original behavior (exactly as main branch)
-        QueuePeekHeight + WindowInsets.systemBars.asPaddingValues().calculateBottomPadding()
-    }
+
+    val dismissedBound = QueuePeekHeight + WindowInsets.systemBars.asPaddingValues().calculateBottomPadding()
+
     val queueSheetState = rememberBottomSheetState(
         dismissedBound = dismissedBound,
         expandedBound = state.expandedBound,
@@ -462,60 +476,40 @@ fun BottomSheetPlayer(
     BottomSheet(
         state = state,
         modifier = modifier,
-        brushBackgroundColor = if (useNewMiniPlayerDesign) {
-            // New design with transparency effects - always use solid background
-            if (useBlackBackground) {
-                Brush.verticalGradient(
-                    colors = listOf(
-                        backgroundColor,
-                        backgroundColor,
-                    )
-                )
-            } else {
-                // Calculate transparency progress (new design)
+        backgroundColor = when (playerBackground) {
+            PlayerBackgroundStyle.BLUR, PlayerBackgroundStyle.GRADIENT -> {
+                // Apply same enhanced fade logic to blur/gradient backgrounds
                 val progress = ((state.value - state.collapsedBound) / (state.expandedBound - state.collapsedBound))
                     .coerceIn(0f, 1f)
                 
-                if (state.value > changeBound) {
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.surfaceContainer.copy(alpha = progress),
-                            backgroundColor
-                        )
-                    )
+                // Only start fading when very close to dismissal (last 20%)
+                val fadeProgress = if (progress < 0.2f) {
+                    ((0.2f - progress) / 0.2f).coerceIn(0f, 1f)
                 } else {
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.surfaceContainer.copy(alpha = progress),
-                            MaterialTheme.colorScheme.surfaceContainer.copy(alpha = progress),
-                        )
-                    )
+                    0f
                 }
+                
+                MaterialTheme.colorScheme.surface.copy(alpha = 1f - fadeProgress)
             }
-        } else {
-            // Original gradient behavior - always use solid background
-            if (useBlackBackground) {
-                Brush.verticalGradient(
-                    colors = listOf(
-                        backgroundColor,
-                        backgroundColor,
-                    )
-                )
-            } else {
-                if (state.value > changeBound) {
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.surfaceContainer,
-                            backgroundColor
-                        )
-                    )
+            else -> {
+                // Enhanced background - stable until last 20% of drag (both normal and pure black)
+                // Calculate progress for fade effect
+                val progress = ((state.value - state.collapsedBound) / (state.expandedBound - state.collapsedBound))
+                    .coerceIn(0f, 1f)
+                
+                // Only start fading when very close to dismissal (last 20%)
+                val fadeProgress = if (progress < 0.2f) {
+                    ((0.2f - progress) / 0.2f).coerceIn(0f, 1f)
                 } else {
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.surfaceContainer,
-                            MaterialTheme.colorScheme.surfaceContainer,
-                        )
-                    )
+                    0f
+                }
+                
+                if (useBlackBackground) {
+                    // Apply same logic to pure black background
+                    Color.Black.copy(alpha = 1f - fadeProgress)
+                } else {
+                    // Apply same logic to normal theme
+                    MaterialTheme.colorScheme.surface.copy(alpha = 1f - fadeProgress)
                 }
             }
         },
@@ -1088,75 +1082,96 @@ fun BottomSheetPlayer(
             }
         }
 
-        AnimatedVisibility(
-            visible = state.isExpanded,
-            enter = fadeIn(tween(500)),
-            exit = fadeOut(tween(500))
-        ) {
-            AnimatedContent(
-                targetState = mediaMetadata,
-                transitionSpec = {
-                    fadeIn(tween(1000)).togetherWith(fadeOut(tween(1000)))
-                }
-            ) { mediaMetadata ->
-                if (playerBackground == PlayerBackgroundStyle.BLUR) {
-                    AsyncImage(
-                        model = mediaMetadata?.thumbnailUrl,
-                        contentDescription = null,
-                        contentScale = ContentScale.FillBounds,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .blur(150.dp)
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.3f))
-                    )
-                }
-            }
-
-            AnimatedContent(
-                targetState = gradientColors,
-                transitionSpec = {
-                    fadeIn(tween(1000)) togetherWith fadeOut(tween(1000))
-                }
-            ) { colors ->
-                if (playerBackground == PlayerBackgroundStyle.GRADIENT && colors.size >= 2 && !state.isDismissed) {
-                    val gradientColorStops = if (colors.size >= 3) {
-                        arrayOf(
-                            0.0f to colors[0], // Top: primary vibrant color
-                            0.5f to colors[1], // Middle: darker variant
-                            1.0f to colors[2]  // Bottom: black
-                        )
-                    } else {
-                        arrayOf(
-                            0.0f to colors[0], // Top: primary color
-                            0.6f to colors[0].copy(alpha = 0.7f), // Middle: faded variant
-                            1.0f to Color.Black // Bottom: black
-                        )
+        // Background Layer - Previous background as base layer during transitions
+        if (!state.isCollapsed) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                when (playerBackground) {
+                    PlayerBackgroundStyle.BLUR -> {
+                        // Layer 1: Previous blur background (stays visible during transition)
+                        if (previousThumbnailUrl != null) {
+                            AsyncImage(
+                                model = previousThumbnailUrl,
+                                contentDescription = "Previous blurred background",
+                                contentScale = ContentScale.FillBounds,
+                                modifier = Modifier.fillMaxSize().blur(radius = 150.dp)
+                            )
+                            Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
+                        }
+                        
+                        // Layer 2: New blur background (animates on top)
+                        AnimatedContent(
+                            targetState = mediaMetadata?.thumbnailUrl,
+                            transitionSpec = {
+                                fadeIn(tween(500)) togetherWith fadeOut(tween(500))
+                            }
+                        ) { thumbnailUrl ->
+                            if (thumbnailUrl != null) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    AsyncImage(
+                                        model = thumbnailUrl,
+                                        contentDescription = "New blurred background",
+                                        contentScale = ContentScale.FillBounds,
+                                        modifier = Modifier.fillMaxSize().blur(radius = 150.dp)
+                                    )
+                                    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
+                                }
+                            }
+                        }
                     }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Brush.verticalGradient(colorStops = gradientColorStops))
-                    )
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.15f))
-                    )
+                    PlayerBackgroundStyle.GRADIENT -> {
+                        // Layer 1: Previous gradient background (stays visible during transition)
+                        if (previousGradientColors.isNotEmpty()) {
+                            val gradientColorStops = if (previousGradientColors.size >= 3) {
+                                arrayOf(
+                                    0.0f to previousGradientColors[0], // Top: primary vibrant color
+                                    0.5f to previousGradientColors[1], // Middle: darker variant
+                                    1.0f to previousGradientColors[2]  // Bottom: black
+                                )
+                            } else {
+                                arrayOf(
+                                    0.0f to previousGradientColors[0], // Top: primary color
+                                    0.6f to previousGradientColors[0].copy(alpha = 0.7f), // Middle: faded variant
+                                    1.0f to Color.Black // Bottom: black
+                                )
+                            }
+                            Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(colorStops = gradientColorStops)))
+                            Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.2f)))
+                        }
+                        
+                        // Layer 2: New gradient background (animates on top)
+                        AnimatedContent(
+                            targetState = gradientColors,
+                            transitionSpec = {
+                                fadeIn(tween(500)) togetherWith fadeOut(tween(500))
+                            }
+                        ) { colors ->
+                            if (colors.isNotEmpty()) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    val gradientColorStops = if (colors.size >= 3) {
+                                        arrayOf(
+                                            0.0f to colors[0], // Top: primary vibrant color
+                                            0.5f to colors[1], // Middle: darker variant
+                                            1.0f to colors[2]  // Bottom: black
+                                        )
+                                    } else {
+                                        arrayOf(
+                                            0.0f to colors[0], // Top: primary color
+                                            0.6f to colors[0].copy(alpha = 0.7f), // Middle: faded variant
+                                            1.0f to Color.Black // Bottom: black
+                                        )
+                                    }
+                                    Box(modifier = Modifier.fillMaxSize().background(Brush.verticalGradient(colorStops = gradientColorStops)))
+                                    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.2f)))
+                                }
+                            }
+                        }
+                    }
+                    else -> {
+                        // DEFAULT or other modes - no background
+                    }
                 }
             }
 
-            if (playerBackground != PlayerBackgroundStyle.DEFAULT && showLyrics) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.3f))
-                )
-            }
         }
 
 // distance
@@ -1177,7 +1192,8 @@ fun BottomSheetPlayer(
                         val thumbnailSize = (screenWidth * 0.4).dp
                         Thumbnail(
                             sliderPositionProvider = { sliderPosition },
-                            modifier = Modifier.size(thumbnailSize)
+                            modifier = Modifier.size(thumbnailSize),
+                            isPlayerExpanded = state.isExpanded // Pass player state
                         )
                     }
                     Column(
@@ -1213,6 +1229,7 @@ fun BottomSheetPlayer(
                         Thumbnail(
                             sliderPositionProvider = { sliderPosition },
                             modifier = Modifier.nestedScroll(state.preUpPostDownNestedScrollConnection),
+                            isPlayerExpanded = state.isExpanded // Pass player state
                         )
                     }
 
@@ -1239,7 +1256,35 @@ fun BottomSheetPlayer(
             TextBackgroundColor = TextBackgroundColor,
             textButtonColor = textButtonColor,
             iconButtonColor = iconButtonColor,
+            onShowLyrics = { showLyricsScreen = true },
             pureBlack = pureBlack,
         )
+        
+        // Lyrics Screen with animation
+        mediaMetadata?.let { metadata ->
+            AnimatedVisibility(
+                visible = showLyricsScreen,
+                enter = slideInVertically(
+                    animationSpec = tween(300),
+                    initialOffsetY = { it }
+                ),
+                exit = slideOutVertically(
+                    animationSpec = tween(300),
+                    targetOffsetY = { it }
+                )
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    LyricsScreen(
+                        mediaMetadata = metadata,
+                        onBackClick = { 
+                            showLyricsScreen = false 
+                        }
+                    )
+                }
+            }
+        }
     }
 }

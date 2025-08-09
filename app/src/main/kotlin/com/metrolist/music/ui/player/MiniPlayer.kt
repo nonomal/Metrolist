@@ -64,7 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.metrolist.music.LocalDatabase
 import com.metrolist.music.LocalPlayerConnection
 import com.metrolist.music.R
@@ -516,7 +516,12 @@ private fun LegacyMiniPlayer(
             .fillMaxWidth()
             .height(MiniPlayerHeight)
             .windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Horizontal))
-            .background(if (pureBlack) Color.Black else Color.Transparent)
+            .background(
+                if (pureBlack) 
+                    Color.Black 
+                else 
+                    MaterialTheme.colorScheme.surfaceContainer // Fixed background independent of player background
+            )
             .let { baseModifier ->
                 if (swipeThumbnail) {
                     baseModifier.pointerInput(Unit) {

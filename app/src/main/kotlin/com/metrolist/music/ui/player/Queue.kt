@@ -78,11 +78,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
@@ -103,11 +102,9 @@ import com.metrolist.music.LocalPlayerConnection
 import com.metrolist.music.R
 import com.metrolist.music.constants.ListItemHeight
 import com.metrolist.music.constants.UseNewPlayerDesignKey
-import com.metrolist.music.constants.UseNewMiniPlayerDesignKey
 import com.metrolist.music.constants.PlayerButtonsStyle
 import com.metrolist.music.constants.PlayerButtonsStyleKey
 import com.metrolist.music.constants.QueueEditLockKey
-import com.metrolist.music.constants.ShowLyricsKey
 import com.metrolist.music.extensions.metadata
 import com.metrolist.music.extensions.move
 import com.metrolist.music.extensions.togglePlayPause
@@ -145,11 +142,12 @@ fun Queue(
     TextBackgroundColor: Color,
     textButtonColor: Color,
     iconButtonColor: Color,
+    onShowLyrics: () -> Unit = {},
     pureBlack: Boolean,
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
-    val clipboardManager = LocalClipboardManager.current
+    val clipboardManager = LocalClipboard.current
     val menuState = LocalMenuState.current
     val bottomSheetPageState = LocalBottomSheetPageState.current
 
@@ -174,15 +172,8 @@ fun Queue(
 
     var locked by rememberPreference(QueueEditLockKey, defaultValue = true)
 
-    var showLyrics by rememberPreference(ShowLyricsKey, defaultValue = false)
-
     val (useNewPlayerDesign, onUseNewPlayerDesignChange) = rememberPreference(
         UseNewPlayerDesignKey,
-        defaultValue = true
-    )
-    
-    val (useNewMiniPlayerDesign) = rememberPreference(
-        UseNewMiniPlayerDesignKey,
         defaultValue = true
     )
 
@@ -214,9 +205,7 @@ fun Queue(
 
     BottomSheet(
         state = state,
-        brushBackgroundColor = Brush.verticalGradient(
-            listOf(Color.Unspecified, Color.Unspecified),
-        ),
+        backgroundColor = Color.Unspecified,
         modifier = modifier,
         collapsedContent = {
             if (useNewPlayerDesign) {
@@ -226,7 +215,7 @@ fun Queue(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 30.dp)
+                        .padding(horizontal = 30.dp, vertical = 12.dp)
                         .windowInsetsPadding(
                             WindowInsets.systemBars.only(
                                 WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal
@@ -316,7 +305,7 @@ fun Queue(
                             .clip(RoundedCornerShape(10.dp))
                             .border(1.dp, borderColor, RoundedCornerShape(10.dp))
                             .clickable {
-                                showLyrics = !showLyrics
+                                onShowLyrics()
                             },
                         contentAlignment = Alignment.Center
                     ) {
@@ -324,7 +313,7 @@ fun Queue(
                             painter = painterResource(id = R.drawable.lyrics),
                             contentDescription = null,
                             modifier = Modifier.size(iconSize),
-                            tint = TextBackgroundColor.copy(alpha = if (showLyrics) 1f else 0.5f)
+                            tint = TextBackgroundColor
                         )
                     }
 
@@ -411,16 +400,10 @@ fun Queue(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 8.dp)
+                        .padding(horizontal = 30.dp, vertical = 12.dp)
                         .windowInsetsPadding(
-                            if (useNewMiniPlayerDesign) {
-                                // When new MiniPlayer design is enabled, only apply horizontal insets
-                                // because dismissedBound is calculated differently
-                                WindowInsets.systemBars.only(WindowInsetsSides.Horizontal)
-                            } else {
-                                // Original behavior
-                                WindowInsets.systemBars.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
-                            }
+                            WindowInsets.systemBars
+                                .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
                         ),
                 ) {
                     TextButton(
@@ -500,7 +483,7 @@ fun Queue(
                     }
 
                     TextButton(
-                        onClick = { showLyrics = !showLyrics },
+                        onClick = { onShowLyrics() },
                         modifier = Modifier.weight(1f)
                     ) {
                         Row(
@@ -512,12 +495,12 @@ fun Queue(
                                 painter = painterResource(id = R.drawable.lyrics),
                                 contentDescription = null,
                                 modifier = Modifier.size(20.dp),
-                                tint = TextBackgroundColor.copy(alpha = if (showLyrics) 1f else 0.5f)
+                                tint = TextBackgroundColor
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = stringResource(id = R.string.lyrics),
-                                color = TextBackgroundColor.copy(alpha = if (showLyrics) 1f else 0.5f),
+                                color = TextBackgroundColor,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 textAlign = TextAlign.Center,
@@ -703,39 +686,42 @@ fun Queue(
                         val currentItem by rememberUpdatedState(window)
                         val dismissBoxState =
                             rememberSwipeToDismissBoxState(
-                                positionalThreshold = { totalDistance ->
-                                    totalDistance
-                                },
-                                confirmValueChange = { dismissValue ->
-                                    if (dismissValue == SwipeToDismissBoxValue.StartToEnd ||
-                                        dismissValue == SwipeToDismissBoxValue.EndToStart
-                                    ) {
-                                        playerConnection.player.removeMediaItem(currentItem.firstPeriodIndex)
-                                        dismissJob?.cancel()
-                                        dismissJob =
-                                            coroutineScope.launch {
-                                                val snackbarResult =
-                                                    snackbarHostState.showSnackbar(
-                                                        message =
-                                                        context.getString(
-                                                            R.string.removed_song_from_playlist,
-                                                            currentItem.mediaItem.metadata?.title,
-                                                        ),
-                                                        actionLabel = context.getString(R.string.undo),
-                                                        duration = SnackbarDuration.Short,
-                                                    )
-                                                if (snackbarResult == SnackbarResult.ActionPerformed) {
-                                                    playerConnection.player.addMediaItem(currentItem.mediaItem)
-                                                    playerConnection.player.moveMediaItem(
-                                                        mutableQueueWindows.size,
-                                                        currentItem.firstPeriodIndex,
-                                                    )
-                                                }
-                                            }
-                                    }
-                                    true
-                                },
+                                positionalThreshold = { totalDistance -> totalDistance }
                             )
+
+                        var processedDismiss by remember { mutableStateOf(false) }
+                        LaunchedEffect(dismissBoxState.currentValue) {
+                            val dv = dismissBoxState.currentValue
+                            if (!processedDismiss && (
+                                    dv == SwipeToDismissBoxValue.StartToEnd ||
+                                    dv == SwipeToDismissBoxValue.EndToStart
+                                )
+                            ) {
+                                processedDismiss = true
+                                playerConnection.player.removeMediaItem(currentItem.firstPeriodIndex)
+                                dismissJob?.cancel()
+                                dismissJob = coroutineScope.launch {
+                                    val snackbarResult = snackbarHostState.showSnackbar(
+                                        message = context.getString(
+                                            R.string.removed_song_from_playlist,
+                                            currentItem.mediaItem.metadata?.title,
+                                        ),
+                                        actionLabel = context.getString(R.string.undo),
+                                        duration = SnackbarDuration.Short,
+                                    )
+                                    if (snackbarResult == SnackbarResult.ActionPerformed) {
+                                        playerConnection.player.addMediaItem(currentItem.mediaItem)
+                                        playerConnection.player.moveMediaItem(
+                                            mutableQueueWindows.size,
+                                            currentItem.firstPeriodIndex,
+                                        )
+                                    }
+                                }
+                            }
+                            if (dv == SwipeToDismissBoxValue.Settled) {
+                                processedDismiss = false
+                            }
+                        }
 
                         val content: @Composable () -> Unit = {
                             Row(

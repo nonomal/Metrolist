@@ -95,8 +95,13 @@ import com.metrolist.music.extensions.findNextMediaItemById
 import com.metrolist.music.extensions.mediaItems
 import com.metrolist.music.extensions.metadata
 import com.metrolist.music.extensions.toMediaItem
+import com.metrolist.music.extensions.toPersistQueue
+import com.metrolist.music.extensions.toQueue
 import com.metrolist.music.lyrics.LyricsHelper
 import com.metrolist.music.models.PersistQueue
+import com.metrolist.music.models.PersistPlayerState
+import com.metrolist.music.models.QueueData
+import com.metrolist.music.models.QueueType
 import com.metrolist.music.models.toMediaMetadata
 import com.metrolist.music.playback.queues.EmptyQueue
 import com.metrolist.music.playback.queues.ListQueue
@@ -294,25 +299,8 @@ class MusicService :
             connectivityObserver.networkStatus.collect { isConnected ->
                 isNetworkConnected.value = isConnected
                 if (isConnected && waitingForNetworkConnection.value) {
+                    // Simple auto-play logic like OuterTune
                     waitingForNetworkConnection.value = false
-                    
-                    // Check if current song is available offline before trying to stream
-                    val currentMediaId = player.currentMediaItem?.mediaId
-                    if (currentMediaId != null) {
-                        val isOfflineAvailable = downloadCache.isCached(currentMediaId, 0, 1) || 
-                                                playerCache.isCached(currentMediaId, 0, CHUNK_LENGTH)
-                        
-                        if (isOfflineAvailable) {
-                            // Use offline version if available
-                            if (player.playWhenReady) {
-                                player.prepare()
-                                player.play()
-                            }
-                            return@collect
-                        }
-                    }
-                    
-                    // Only try to stream if song is not available offline
                     if (player.currentMediaItem != null && player.playWhenReady) {
                         player.prepare()
                         player.play()
@@ -413,14 +401,10 @@ class MusicService :
                     }
                 }
             }.onSuccess { queue ->
+                // Convert back to proper queue type
+                val restoredQueue = queue.toQueue()
                 playQueue(
-                    queue =
-                    ListQueue(
-                        title = queue.title,
-                        items = queue.items.map { it.toMediaItem() },
-                        startIndex = queue.mediaItemIndex,
-                        position = queue.position,
-                    ),
+                    queue = restoredQueue,
                     playWhenReady = false,
                 )
             }
@@ -433,6 +417,28 @@ class MusicService :
             }.onSuccess { queue ->
                 automixItems.value = queue.items.map { it.toMediaItem() }
             }
+            
+            // Restore player state
+            runCatching {
+                filesDir.resolve(PERSISTENT_PLAYER_STATE_FILE).inputStream().use { fis ->
+                    ObjectInputStream(fis).use { oos ->
+                        oos.readObject() as PersistPlayerState
+                    }
+                }
+            }.onSuccess { playerState ->
+                // Restore player settings after queue is loaded
+                scope.launch {
+                    delay(1000) // Wait for queue to be loaded
+                    player.repeatMode = playerState.repeatMode
+                    player.shuffleModeEnabled = playerState.shuffleModeEnabled
+                    player.volume = playerState.volume
+                    
+                    // Restore position if it's still valid
+                    if (playerState.currentMediaItemIndex < player.mediaItemCount) {
+                        player.seekTo(playerState.currentMediaItemIndex, playerState.currentPosition)
+                    }
+                }
+            }
         }
 
         // Save queue periodically to prevent queue loss from crash or force kill
@@ -440,6 +446,16 @@ class MusicService :
             while (isActive) {
                 delay(30.seconds)
                 if (dataStore.get(PersistentQueueKey, true)) {
+                    saveQueueToDisk()
+                }
+            }
+        }
+        
+        // Save queue more frequently when playing to ensure state is preserved
+        scope.launch {
+            while (isActive) {
+                delay(10.seconds)
+                if (dataStore.get(PersistentQueueKey, true) && player.isPlaying) {
                     saveQueueToDisk()
                 }
             }
@@ -906,6 +922,11 @@ class MusicService :
                 }
             }
         }
+        
+        // Save state when media item changes
+        if (dataStore.get(PersistentQueueKey, true)) {
+            saveQueueToDisk()
+        }
     }
 
     override fun onPlaybackStateChanged(
@@ -915,6 +936,11 @@ class MusicService :
             currentQueue = EmptyQueue
             player.shuffleModeEnabled = false
             queueTitle = null
+        }
+        
+        // Save state when playback state changes
+        if (dataStore.get(PersistentQueueKey, true)) {
+            saveQueueToDisk()
         }
     }
 
@@ -973,6 +999,11 @@ class MusicService :
             shuffledIndices[0] = player.currentMediaItemIndex
             player.setShuffleOrder(DefaultShuffleOrder(shuffledIndices, System.currentTimeMillis()))
         }
+        
+        // Save state when shuffle mode changes
+        if (dataStore.get(PersistentQueueKey, true)) {
+            saveQueueToDisk()
+        }
     }
 
     override fun onRepeatModeChanged(repeatMode: Int) {
@@ -982,29 +1013,17 @@ class MusicService :
                 settings[RepeatModeKey] = repeatMode
             }
         }
+        
+        // Save state when repeat mode changes
+        if (dataStore.get(PersistentQueueKey, true)) {
+            saveQueueToDisk()
+        }
     }
 
     override fun onPlayerError(error: PlaybackException) {
         super.onPlayerError(error)
         val isConnectionError = (error.cause?.cause is PlaybackException) &&
                 (error.cause?.cause as PlaybackException).errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
-
-        // Check if current song is available offline first
-        val currentMediaId = player.currentMediaItem?.mediaId
-        if (currentMediaId != null) {
-            val isOfflineAvailable = downloadCache.isCached(
-                currentMediaId,
-                0,
-                1
-            ) || playerCache.isCached(currentMediaId, 0, CHUNK_LENGTH)
-            
-            if (isOfflineAvailable) {
-                // If song is available offline but still got error, it might be a temporary issue
-                // Just pause instead of skipping
-                stopOnError()
-                return
-            }
-        }
 
         if (!isNetworkConnected.value || isConnectionError) {
             waitOnNetworkError()
@@ -1045,37 +1064,20 @@ class MusicService :
         return ResolvingDataSource.Factory(createCacheDataSource()) { dataSpec ->
             val mediaId = dataSpec.key ?: error("No media id")
 
-            // First priority: Check for downloaded content
             if (downloadCache.isCached(
                     mediaId,
                     dataSpec.position,
                     if (dataSpec.length >= 0) dataSpec.length else 1
-                )
+                ) ||
+                playerCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH)
             ) {
                 scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
                 return@Factory dataSpec
             }
 
-            // Second priority: Check for cached content
-            if (playerCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH)) {
-                scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
-                return@Factory dataSpec
-            }
-
-            // Third priority: Check cached URLs (if still valid)
             songUrlCache[mediaId]?.takeIf { it.second > System.currentTimeMillis() }?.let {
                 scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
                 return@Factory dataSpec.withUri(it.first.toUri())
-            }
-
-            // Last resort: Try to get from YouTube (only if network is available)
-            if (!isNetworkConnected.value) {
-                // If no network and no cached version, throw a network error
-                throw PlaybackException(
-                    getString(R.string.error_no_internet),
-                    null,
-                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
-                )
             }
 
             val playbackData = runBlocking(Dispatchers.IO) {
@@ -1084,26 +1086,39 @@ class MusicService :
                     audioQuality = audioQuality,
                     connectivityManager = connectivityManager,
                 )
-            }.getOrNull()
+            }.getOrElse { throwable ->
+                when (throwable) {
+                    is PlaybackException -> throw throwable
 
-            if (playbackData == null) {
-                // Check one more time if we have any cached version as fallback
-                val hasAnyCachedVersion = downloadCache.keys.any { it == mediaId } || 
-                                        playerCache.keys.any { it == mediaId }
-                
-                if (hasAnyCachedVersion) {
-                    // Try to use cached version even if partially available
-                    scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
-                    return@Factory dataSpec
-                } else {
-                    throw PlaybackException(
+                    is java.net.ConnectException, is java.net.UnknownHostException -> {
+                        throw PlaybackException(
+                            getString(R.string.error_no_internet),
+                            throwable,
+                            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+                        )
+                    }
+
+                    is java.net.SocketTimeoutException -> {
+                        throw PlaybackException(
+                            getString(R.string.error_timeout),
+                            throwable,
+                            PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+                        )
+                    }
+
+                    else -> throw PlaybackException(
                         getString(R.string.error_unknown),
-                        null,
+                        throwable,
                         PlaybackException.ERROR_CODE_REMOTE_ERROR
                     )
                 }
-            } else {
-                val format = playbackData.format
+            }
+
+            val nonNullPlayback = requireNotNull(playbackData) {
+                getString(R.string.error_unknown)
+            }
+            run {
+                val format = nonNullPlayback.format
 
                 database.query {
                     upsert(
@@ -1115,17 +1130,17 @@ class MusicService :
                             bitrate = format.bitrate,
                             sampleRate = format.audioSampleRate,
                             contentLength = format.contentLength!!,
-                            loudnessDb = playbackData.audioConfig?.loudnessDb,
-                            playbackUrl = playbackData.playbackTracking?.videostatsPlaybackUrl?.baseUrl
+                            loudnessDb = nonNullPlayback.audioConfig?.loudnessDb,
+                            playbackUrl = nonNullPlayback.playbackTracking?.videostatsPlaybackUrl?.baseUrl
                         )
                     )
                 }
-                scope.launch(Dispatchers.IO) { recoverSong(mediaId, playbackData) }
+                scope.launch(Dispatchers.IO) { recoverSong(mediaId, nonNullPlayback) }
 
-                val streamUrl = playbackData.streamUrl
+                val streamUrl = nonNullPlayback.streamUrl
 
                 songUrlCache[mediaId] =
-                    streamUrl to System.currentTimeMillis() + (playbackData.streamExpiresInSeconds * 1000L)
+                    streamUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
                 return@Factory dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
             }
         }
@@ -1202,15 +1217,18 @@ class MusicService :
         if (player.playbackState == STATE_IDLE) {
             filesDir.resolve(PERSISTENT_AUTOMIX_FILE).delete()
             filesDir.resolve(PERSISTENT_QUEUE_FILE).delete()
+            filesDir.resolve(PERSISTENT_PLAYER_STATE_FILE).delete()
             return
         }
-        val persistQueue =
-            PersistQueue(
-                title = queueTitle,
-                items = player.mediaItems.mapNotNull { it.metadata },
-                mediaItemIndex = player.currentMediaItemIndex,
-                position = player.currentPosition,
-            )
+        
+        // Save current queue with proper type information
+        val persistQueue = currentQueue.toPersistQueue(
+            title = queueTitle,
+            items = player.mediaItems.mapNotNull { it.metadata },
+            mediaItemIndex = player.currentMediaItemIndex,
+            position = player.currentPosition
+        )
+        
         val persistAutomix =
             PersistQueue(
                 title = "automix",
@@ -1218,6 +1236,18 @@ class MusicService :
                 mediaItemIndex = 0,
                 position = 0,
             )
+            
+        // Save player state
+        val persistPlayerState = PersistPlayerState(
+            playWhenReady = player.playWhenReady,
+            repeatMode = player.repeatMode,
+            shuffleModeEnabled = player.shuffleModeEnabled,
+            volume = player.volume,
+            currentPosition = player.currentPosition,
+            currentMediaItemIndex = player.currentMediaItemIndex,
+            playbackState = player.playbackState
+        )
+        
         runCatching {
             filesDir.resolve(PERSISTENT_QUEUE_FILE).outputStream().use { fos ->
                 ObjectOutputStream(fos).use { oos ->
@@ -1231,6 +1261,15 @@ class MusicService :
             filesDir.resolve(PERSISTENT_AUTOMIX_FILE).outputStream().use { fos ->
                 ObjectOutputStream(fos).use { oos ->
                     oos.writeObject(persistAutomix)
+                }
+            }
+        }.onFailure {
+            reportException(it)
+        }
+        runCatching {
+            filesDir.resolve(PERSISTENT_PLAYER_STATE_FILE).outputStream().use { fos ->
+                ObjectOutputStream(fos).use { oos ->
+                    oos.writeObject(persistPlayerState)
                 }
             }
         }.onFailure {
@@ -1282,6 +1321,7 @@ class MusicService :
         const val CHUNK_LENGTH = 512 * 1024L
         const val PERSISTENT_QUEUE_FILE = "persistent_queue.data"
         const val PERSISTENT_AUTOMIX_FILE = "persistent_automix.data"
+        const val PERSISTENT_PLAYER_STATE_FILE = "persistent_player_state.data"
         const val MAX_CONSECUTIVE_ERR = 5
     }
 }

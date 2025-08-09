@@ -109,9 +109,11 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import coil.compose.AsyncImage
-import coil.imageLoader
-import coil.request.ImageRequest
+import coil3.compose.AsyncImage
+import coil3.imageLoader
+import coil3.request.ImageRequest
+import coil3.request.allowHardware
+import coil3.toBitmap
 import com.metrolist.innertube.YouTube
 import com.metrolist.innertube.models.SongItem
 import com.metrolist.innertube.models.WatchEndpoint
@@ -326,7 +328,7 @@ class MainActivity : ComponentActivity() {
                                             .allowHardware(false) // pixel access is not supported on Config#HARDWARE bitmaps
                                             .build(),
                                     )
-                                (result.drawable as? BitmapDrawable)?.bitmap?.extractThemeColor()
+                                result.image?.toBitmap()?.extractThemeColor()
                                     ?: DefaultThemeColor
                             }
                         } else {
@@ -455,11 +457,10 @@ class MainActivity : ComponentActivity() {
                             bottomInset,
                             shouldShowNavigationBar,
                             playerBottomSheetState.isDismissed,
-                            useNewMiniPlayerDesign
                         ) {
                             var bottom = bottomInset
                             if (shouldShowNavigationBar) bottom += NavigationBarHeight
-                            if (!playerBottomSheetState.isDismissed) bottom += MiniPlayerHeight + (if (useNewMiniPlayerDesign) MiniPlayerBottomSpacing else 0.dp)
+                            if (!playerBottomSheetState.isDismissed) bottom += MiniPlayerHeight
                             windowsInsets
                                 .only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
                                 .add(WindowInsets(top = AppBarHeight, bottom = bottom))
@@ -801,7 +802,7 @@ class MainActivity : ComponentActivity() {
                                             modifier =
                                             Modifier
                                                 .fillMaxSize()
-                                                .padding(bottom = if (!playerBottomSheetState.isDismissed) MiniPlayerHeight + (if (useNewMiniPlayerDesign) MiniPlayerBottomSpacing else 0.dp) else 0.dp)
+                                                .padding(bottom = if (!playerBottomSheetState.isDismissed) MiniPlayerHeight else 0.dp)
                                                 .navigationBarsPadding(),
                                         ) { searchSource ->
                                             when (searchSource) {
